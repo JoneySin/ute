@@ -494,21 +494,18 @@ async def api_search(req):
         off = 0
 
     lim = MAX_WEB_RESULTS
-    # ग्रुपिंग वरिएंट्स को collapse करके एक कार्ड बनाती है, इसलिए 21 डिस्प्ले
-    # कार्ड दिखाने के लिए कच्चे रिजल्ट्स ज्यादा फेच करने पड़ते हैं (worst case:
-    # हर 4 वरिएंट्स → 1 ग्रुप कार्ड)। बिना ग्रुपिंग के lim ही काफी है।
-    fetch_lim = lim * 4 if want_group else lim
 
     # 🆕 कोई query नहीं दी गई — dashboard पर खाली स्क्रीन दिखाने की बजाय
     # सबसे नई अपलोड की गई फाइलें (Recently Added) दिखाओ
     if not q:
-        recent_docs, recent_next_offset = await get_recent_files(fetch_lim, offset=off, collection_type=col)
+        recent_docs, recent_next_offset = await get_recent_files(lim, offset=off, collection_type=col)
         results_list = _build_results_list(recent_docs, mode)
         if want_group:
+            # ग्रुपिंग वरिएंट्स को collapse करके एक कार्ड बनाती है।
+            # ग्रुप के बाद कार्ड कम रह सकते हैं, पर सर्च काम करेगी।
             grouped = group_results(results_list)
-            display_items = grouped[:lim]
-            has_more = bool(recent_next_offset) and len(grouped) >= lim
-            final_next = recent_next_offset if has_more else ""
+            display_items = grouped
+            final_next = recent_next_offset
         else:
             display_items = results_list
             final_next = recent_next_offset
@@ -520,8 +517,7 @@ async def api_search(req):
             "is_recent": True,
         }, dumps=fast_json)
 
-    # ग्रुपिंग केस में ट्रेंडिंग कैश का उपयोग नहीं — उसमें केवल lim रिजल्ट्स होते हैं,
-    # ग्रुपिंग के बाद डिस्प्ले कार्ड कम रह जाएंगे। हमेशा ताजा डेटा फेच करें।
+    # ट्रेंडिंग कैश सिर्फ़ बिना-ग्रुपिंग सर्च के लिए (ग्रुपिंग में रिजल्ट collapse होते हैं)
     if off == 0 and not want_group:
         trend_key = f"{col}_{mode}_{q.lower()}"
         now_ts = time.time()
@@ -548,7 +544,7 @@ async def api_search(req):
 
     if not all_m:
         all_m, next_offset, _, _ = await get_search_results(
-            q, fetch_lim, offset=off, collection_type=col, bypass_count=True
+            q, lim, offset=off, collection_type=col, bypass_count=True
         )
 
     has_more = bool(next_offset)
@@ -567,10 +563,27 @@ async def api_search(req):
         }
 
     if want_group:
+        # ग्रुपिंग वरिएंट्स collapse करके एक कार्ड बनाती है, इसलिए lim डिस्प्ले
+        # कार्ड पाने के लिए ज़रूरत पड़ने पर एक से ज़्यादा बैच फेच करें
+        all_docs = []
+        cursor_offset = off
+        max_fetch = lim * 3  # सुरक्षा: ज़्यादा से ज़्यादा 3 बैच
+
+        while len(all_docs) < max_fetch:
+            batch, batch_next, _, _ = await get_search_results(
+                q, lim, offset=cursor_offset, collection_type=col, bypass_count=True
+            )
+            if not batch:
+                break
+            all_docs.extend(batch)
+            if not batch_next:
+                break
+            cursor_offset = batch_next
+
+        results_list = _build_results_list(all_docs, mode)
         grouped = group_results(results_list)
         display_items = grouped[:lim]
-        has_more_disp = bool(next_offset) and len(grouped) >= lim
-        final_next = next_offset if has_more_disp else ""
+        final_next = cursor_offset if len(grouped) >= lim else ""
     else:
         display_items = results_list
         final_next = next_offset

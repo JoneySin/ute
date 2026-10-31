@@ -4,7 +4,8 @@ from web.web_assets import build_page, get_auth, form_wrapper, MAX_WEB_RESULTS, 
 from utils import temp
 from database.users_chats_db import web_db
 # 🗂️ Admin group modal (dashboard file cards ke 🗂 button se khulta hai)
-from web.group_ui import GROUP_UI_CSS, GROUP_MODAL_HTML, GROUP_MIGRATE_HTML, GROUP_UI_JS
+from web.group_ui import (GROUP_UI_CSS, GROUP_MODAL_HTML, GROUP_MIGRATE_HTML, GROUP_UI_JS,
+                          GROUP_BASIS_HTML)
 
 dashboard_routes = web.RouteTableDef()
 
@@ -89,7 +90,13 @@ CARD_CSS = """
 /* 📸 Thumbnail tap par admin action row (Manage / Migrate / Delete) khulti hai —
    tab quality bar chhup jaati hai taaki buttons saaf dikhein. */
 .grp-card.admin-active .grp-qbar{opacity:0;transition:opacity .15s}
-.grp-card .poster-admin .btn-grp{background:rgba(120,90,10,.88)}
+.grp-card .poster-admin .btn-grp{background:rgba(120,90,10,.88);border:1px solid rgba(255,209,102,.35);color:#ffd166}
+/* 🆔 har group ka id + ✅ verified / ⚠ unverified state */
+.grp-idchip{background:rgba(0,0,0,.72);border:1px solid rgba(255,255,255,.22);border-radius:5px;padding:3px 6px;font-size:9px;font-weight:900;letter-spacing:.3px;color:#cfd6e4;font-family:ui-monospace,Menlo,monospace;line-height:1.4}
+.grp-vchip{border-radius:5px;padding:3px 7px;font-size:9px;font-weight:900;letter-spacing:.5px;line-height:1.4;white-space:nowrap}
+.grp-vchip.ok{background:rgba(16,120,60,.9);border:1px solid rgba(60,220,130,.5);color:#d1ffe4}
+.grp-vchip.warn{background:rgba(150,105,10,.9);border:1px solid rgba(255,209,102,.5);color:#ffe9b0}
+.grp-vchip.auto{background:rgba(60,66,80,.9);border:1px solid rgba(255,255,255,.25);color:#dfe4ee}
 .grp-variants{display:none;border-top:1px solid var(--border);background:var(--bg2)}
 .grp-card.open .grp-variants{display:grid;grid-template-columns:1fr;gap:8px;padding:10px}
 @media(min-width:600px){.grp-card.open .grp-variants{grid-template-columns:repeat(3,1fr)}}
@@ -109,6 +116,14 @@ CARD_CSS = """
 # ─────────────────────────────────────────────────────────────────────────────
 JS_ENGINE = """
 var curQ='',curOff=0,nextOff='',curCol='all',curPage=1;
+/* 🧩 grouping ka aadhar — admin dropdown se badalta hai (quality/episode/season).
+   localStorage se pehle hi load kar lete hain taaki page kholte hi pehla search
+   bhi admin ki chuni hui basis par ho (server non-admin par quality force karta hai). */
+var gbasis='quality';
+try{var _sb=localStorage.getItem('ff_dashboard_basis');
+    if(_sb==='quality'||_sb==='episode'||_sb==='season'){gbasis=_sb;}}catch(e){}
+/* group card ka poora data (key → card) — popup actions isi se chalte hain */
+var GRP_DATA={};
 var searchReqId=0;
 // Dashboard mode has its own preference key so an old shared posterMode value
 // cannot override the text-only dashboard default.
@@ -163,6 +178,30 @@ document.querySelectorAll('.cdd-menu').forEach(function(m){
     m.addEventListener('click',function(e){e.stopPropagation();});
 });
 function changeCol(val){curCol=val;doSearch(0,true);}
+
+/* 🧩 Grouping basis dropdown (sirf admin ke page par hota hai) */
+function toggleBasis(e){
+    if(e){e.stopPropagation();}
+    var menu=document.getElementById('cddBasisMenu'),btn=document.getElementById('cddBasisBtn');
+    if(!menu) return;
+    var isOpen=menu.style.display!=='none';
+    closeCdds();
+    if(isOpen){menu.style.display='none';btn.classList.remove('open');}
+    else{menu.style.display='block';btn.classList.add('open');}
+}
+function pickBasis(val,label,el,e){
+    if(e){e.stopPropagation();}
+    gbasis=val;
+    try{localStorage.setItem('ff_dashboard_basis',gbasis);}catch(err){}
+    var l=document.getElementById('cddBasisLabel');
+    if(l) l.innerHTML=label;
+    document.querySelectorAll('#cddBasisMenu .cdd-item').forEach(function(i){i.classList.remove('selected');});
+    if(el) el.classList.add('selected');
+    var menu=document.getElementById('cddBasisMenu'),btn=document.getElementById('cddBasisBtn');
+    if(menu) menu.style.display='none';
+    if(btn) btn.classList.remove('open');
+    doSearch(0,true);
+}
 
 /* ✅ DUPLICATE REMOVED: handleThumbError() यहाँ दोबारा defined था, जबकि
    web_assets.py के global JS में यह पहले से है (और वहाँ वाला version बेहतर है —
@@ -252,30 +291,37 @@ function cardHtml(f,nested){
 
 /* 🗂️ Ek title ki alag-alag quality ka group card.
    • Naam par click → group khulta hai aur uski saari files dikh jaati hain.
-   • Thumbnail par click → admin ke liye action row (Manage / Migrate / Delete),
+   • Thumbnail par click → admin action row (Manage / Verify / Migrate / Delete),
      bilkul waise hi jaise file card me Edit/Delete ka popup aata hai.
    • Quality count + labels thumbnail ke ANDAR, neeche.
-   Naam ke neeche koi extra text/button nahi hota. */
+   • Har group ka apna 🆔 hota hai; ✅ VERIFIED sirf admin ke check karne par. */
 function groupHtml(g){
+    GRP_DATA[g.key]=g;                       /* popup actions isi data se chalte hain */
     var open=openGroups[g.key]?' open':'';
     var vlist=g.variants||[];
     var labels=(g.labels||[]).map(function(l){return '<span class="grp-qlabel">'+l+'</span>';}).join('');
     var labelsText=(g.labels||[]).join(' · ');
-    var qWord=(g.count===1?'Quality':'Qualities');
+    var basis=g.basis||'quality';
+    var epCount=parseInt(g.ep_count,10)||0;
+    var qWord = basis==='season' ? (epCount===1?'Episode':'Episodes')
+                                 : (g.count===1?'Quality':'Qualities');
     var master=vlist[0]||{};
+    var k=g.key;
+    var idText = g.gid ? String(g.gid).slice(-6) : String(g.key||'').slice(0,6);
+    var idChip = '<span class="grp-idchip">#'+idText+'</span>';
+    var vChip = g.verified
+        ? '<span class="grp-vchip ok">&#10003; VERIFIED</span>'
+        : (g.manual ? '<span class="grp-vchip warn">&#9888; UNVERIFIED</span>'
+                    : '<span class="grp-vchip auto">AUTO</span>');
 
     /* admin action row — thumbnail ke neeche wali patti (tap par khulti hai) */
     var adminBtns='';
-    if(isAdminView && g.manual && g.gid){
+    if(isAdminView){
         adminBtns='<div class="poster-admin">'+
-            '<button class="btn-edit" onclick="event.stopPropagation();grpManage(\\''+g.gid+'\\')">&#128451; Manage</button>'+
-            '<button class="btn-grp" onclick="event.stopPropagation();grpMigrate(\\''+g.gid+'\\')">&#128256; Migrate</button>'+
-            '<button class="btn-del" onclick="event.stopPropagation();grpDeleteGroup(\\''+g.gid+'\\')">&#128465; Delete</button>'+
-        '</div>';
-    } else if(isAdminView && master.file_id){
-        /* auto group: pehle manage karke DB group banao */
-        adminBtns='<div class="poster-admin">'+
-            '<button class="btn-edit" onclick="event.stopPropagation();openGroupModal(\\''+master.file_id+'\\',\\''+(master.raw_collection||'primary')+'\\')">&#128451; Manage</button>'+
+            '<button class="btn-edit" onclick="event.stopPropagation();grpManage(\\''+k+'\\')">&#128451; Manage</button>'+
+            '<button class="btn-grp" onclick="event.stopPropagation();grpVerify(\\''+k+'\\')">'+(g.verified?'&#10003; Verified':'&#9989; Verify')+'</button>'+
+            '<button class="btn-grp" onclick="event.stopPropagation();grpMigrate(\\''+k+'\\')">&#128256; Migrate</button>'+
+            (g.gid?'<button class="btn-del" onclick="event.stopPropagation();grpDeleteGroup(\\''+k+'\\')">&#128465; Delete</button>':'')+
         '</div>';
     }
     var tapFn=adminBtns?"toggleAdminBtns(this.closest('.grp-card'),event)":"toggleGroup(this.closest('.grp-card'),event)";
@@ -288,7 +334,7 @@ function groupHtml(g){
             '<div class="poster-top">'+
                 '<span class="type-chip">'+String(g.type||'VIDEO').toUpperCase()+'</span>'+
                 '<span class="size-chip">'+g.count+' FILES</span>'+
-                (g.manual?'<span class="grp-manual-chip">MANUAL</span>':'')+
+                idChip+vChip+
             '</div>'+
             '<div class="grp-qbar">'+
                 '<span class="grp-qcount">&#127916; '+g.count+' '+qWord+'</span>'+
@@ -301,6 +347,7 @@ function groupHtml(g){
             '<span class="tc-type">'+String(g.type||'VIDEO').toUpperCase()+'</span>'+
             '<span class="grp-text-count">&#127916; '+g.count+' '+qWord+'</span>'+
             '<span class="tc-res">'+labelsText+'</span>'+
+            idChip+
         '</div>';
         if(adminBtns){ poster+=adminBtns.replace('poster-admin','text-admin-row'); }
     }
@@ -339,7 +386,7 @@ async function doSearch(o,allowEmpty){
     },150);
 
     try{
-        var r=await fetch('/api/search?q='+encodeURIComponent(q)+'&offset='+o+'&col='+curCol+'&mode='+pMode+'&group=1');
+        var r=await fetch('/api/search?q='+encodeURIComponent(q)+'&offset='+o+'&col='+curCol+'&mode='+pMode+'&group=1&gbasis='+encodeURIComponent(gbasis));
         if(myReq!==searchReqId){clearTimeout(loadTimer);if(qWrap)qWrap.classList.remove('loading');return;}
         clearTimeout(loadTimer);
         if(qWrap)qWrap.classList.remove('loading');
@@ -454,6 +501,7 @@ SEARCH_ZONE = (
                     '<div class="cdd-item" data-val="archive" onclick="pickCol(\'archive\',\'\U0001f7e0 Archive\',this)">\U0001f7e0 Archive<span class="cdd-radio"><span class="cdd-radio-dot"></span></span></div>'
                 '</div>'
             '</div>'
+            '<!--GBASIS-->'
             '<div class="cdd-wrap" id="cddModeWrap">'
                 '<div class="cdd-btn" id="cddModeBtn" onclick="toggleCdd(\'mode\')">'
                     '<span id="cddModeLabel">' + _DEF_MODE_LBL + '</span>'
@@ -500,7 +548,8 @@ async def dash(req):
     body = DASHBOARD_BODY
     if role == "admin":
         # Group modal + shortcut sirf admin ke page par (users ko extra JS/CSS nahi)
-        body = (DASHBOARD_BODY + GROUP_UI_CSS + GROUP_MODAL_HTML + GROUP_MIGRATE_HTML + GROUP_UI_JS
+        body = (DASHBOARD_BODY.replace("<!--GBASIS-->", GROUP_BASIS_HTML)
+                + GROUP_UI_CSS + GROUP_MODAL_HTML + GROUP_MIGRATE_HTML + GROUP_UI_JS
                 + '<a href="/groups" class="dash-groups-fab" title="Saare quality groups manage karo">'
                   '<span style="font-size:15px">&#128451;</span> Quality Groups</a>')
     return build_page("Home - Fast Finder", body, "", "dash", role)

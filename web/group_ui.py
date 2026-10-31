@@ -9,8 +9,9 @@ Modal ek hi jagah se teeno kaam karta hai:
   • alag-alag naam wali files ko search karke group me jodna / nikaalna.
 
 Dashboard par group card ka THUMBNAIL tap karne par action row khulti hai:
-Manage (yahi modal) / Migrate (doosre group me merge) / Delete.
-Group ka NAAM tap karne par uski saari files khulti hain.
+Manage (yahi modal) / Verify (✅ bharosemand) / Migrate (doosre group me merge) / Delete.
+Group ka NAAM tap karne par uski saari files khulti hain. Har group ka 🆔 hota hai;
+sirf admin-verified group hi "bharosemand" mana jaata hai.
 """
 
 GROUP_UI_CSS = """<style>
@@ -63,7 +64,50 @@ GROUP_UI_CSS = """<style>
 .gm-migrow:hover{border-color:var(--accent);background:var(--bg4)}
 .gm-migrow .gm-add{margin-left:auto}
 .gm-mig-title{font-size:11.5px;font-weight:900;color:#ffd166;margin:2px 0 8px}
+/* ✅ verified / ⚠ unverified badges + group id */
+.gm-vchip{display:inline-flex;align-items:center;gap:4px;border-radius:5px;padding:2px 7px;font-size:9px;font-weight:900;letter-spacing:.4px}
+.gm-vchip.ok{background:rgba(16,120,60,.9);border:1px solid rgba(60,220,130,.45);color:#d1ffe4}
+.gm-vchip.warn{background:rgba(140,100,10,.88);border:1px solid rgba(255,209,102,.45);color:#ffe9b0}
+.gm-idchip{display:inline-flex;align-items:center;border-radius:5px;padding:2px 6px;font-size:9px;font-weight:900;letter-spacing:.3px;background:rgba(0,0,0,.66);border:1px solid rgba(255,255,255,.22);color:#cfd6e4;font-family:ui-monospace,Menlo,monospace}
+.gm-gtop{position:absolute;top:0;left:0;right:0;display:flex;align-items:center;gap:5px;padding:7px 8px;z-index:2}
+.gm-vrow{display:flex;align-items:flex-start;gap:9px;margin-top:12px;background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:9px 11px;cursor:pointer}
+.gm-vrow input{margin-top:2px;accent-color:var(--accent);width:15px;height:15px;flex-shrink:0;cursor:pointer}
+.gm-vrow b{font-size:12px;display:block;color:var(--text)}
+.gm-vrow span{font-size:10.5px;color:var(--muted);line-height:1.5}
+/* 🧩 basis dropdown 2 dropdown ke saath fit ho — mobile par wrap */
+#cddBasisWrap .cdd-btn{max-width:44vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+@media(max-width:560px){.search-row2{flex-wrap:wrap;row-gap:8px}}
 </style>"""
+
+
+# 🧩 GROUPING BASIS selector — sirf admin ke dashboard me search row me inject hota hai.
+GROUP_BASIS_HTML = """
+<div class="cdd-wrap" id="cddBasisWrap">
+    <div class="cdd-btn" id="cddBasisBtn" onclick="toggleBasis(event)">
+        <span id="cddBasisLabel">&#129513; Quality</span>
+    </div>
+    <span class="cdd-arrow">&#9660;</span>
+    <div class="cdd-menu" id="cddBasisMenu" style="display:none">
+        <div class="cdd-item selected" data-val="quality" onclick="pickBasis('quality','&#129513; Quality',this)">&#129513; Quality (same title, saari qualities)<span class="cdd-radio"><span class="cdd-radio-dot"></span></span></div>
+        <div class="cdd-item" data-val="episode" onclick="pickBasis('episode','&#127902; Episode',this)">&#127902; Episode (har episode ka apna card)<span class="cdd-radio"><span class="cdd-radio-dot"></span></span></div>
+        <div class="cdd-item" data-val="season" onclick="pickBasis('season','&#128250; Season',this)">&#128250; Season (ek season ke saare episodes)<span class="cdd-radio"><span class="cdd-radio-dot"></span></span></div>
+    </div>
+</div>
+<script>
+(function(){
+    var v = 'quality';
+    try { v = localStorage.getItem('ff_dashboard_basis') || 'quality'; } catch(e) {}
+    if(['quality','episode','season'].indexOf(v) < 0) v = 'quality';
+    if(typeof gbasis !== 'undefined') gbasis = v;
+    var labels = {quality:'&#129513; Quality', episode:'&#127902; Episode', season:'&#128250; Season'};
+    var l = document.getElementById('cddBasisLabel');
+    if(l) l.innerHTML = labels[v];
+    document.querySelectorAll('#cddBasisMenu .cdd-item').forEach(function(i){
+        i.classList.toggle('selected', i.getAttribute('data-val') === v);
+    });
+})();
+</script>
+"""
 
 
 GROUP_MODAL_HTML = """
@@ -85,6 +129,12 @@ GROUP_MODAL_HTML = """
                 <div class="gm-hint">Naam aur thumbnail search results me master card par dikhte hain. Quality count files se apne aap banta hai.</div>
             </div>
         </div>
+
+        <label class="gm-vrow" for="gmVerified">
+            <input type="checkbox" id="gmVerified">
+            <span><b>&#9989; Admin-verified group</b>
+            Tick karne par ye group + uska ID "bharosemand" maana jayega. Bina tick wale groups auto-detect hue hain &mdash; unme galti ho sakti hai.</span>
+        </label>
 
         <div class="scard-label" style="margin-top:12px">&#128194; Files in this group (<span id="gmCount">0</span>)</div>
         <div class="gm-members" id="gmMembers"></div>
@@ -122,11 +172,11 @@ GROUP_MIGRATE_HTML = """
 
 GROUP_UI_JS = """<script>
 /* 🗂️ GROUP ADMIN UI — dashboard + /groups page dono me same modal */
-var GMOD = {gid:'', title:'', members:[], thumb:'', thumbFile:null, fileMap:{}, preview:''};
+var GMOD = {gid:'', title:'', members:[], thumb:'', thumbFile:null, fileMap:{}, preview:'', verified:false};
 
 function gmMode(){ return (typeof pMode !== 'undefined' && pMode) ? pMode : 'tg'; }
 function gmEsc(s){ return String(s===undefined||s===null?'':s).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];}); }
-function gmPayload(){ return {gid:GMOD.gid||'', title:GMOD.title||'', members:GMOD.members.map(function(m){return {fid:m.fid,col:m.col};})}; }
+function gmPayload(){ return {gid:GMOD.gid||'', title:GMOD.title||'', members:GMOD.members.map(function(m){return {fid:m.fid,col:m.col};}), verified:!!GMOD.verified}; }
 
 function gmMemberRow(m){
     return '<div class="gm-mrow">'+
@@ -166,7 +216,9 @@ function gmRenderResults(files){
 }
 
 function openGroupModal(fid, col, gid){
-    GMOD = {gid:gid||'', title:'', members:[], thumb:'', thumbFile:null, fileMap:{}, preview:'', searchFiles:[]};
+    GMOD = {gid:gid||'', title:'', members:[], thumb:'', thumbFile:null, fileMap:{}, preview:'', searchFiles:[], verified:false};
+    var vBox = document.getElementById('gmVerified');
+    if(vBox) vBox.checked = false;
     document.getElementById('gmTitle').value = '';
     document.getElementById('gmSearch').value = '';
     document.getElementById('gmResults').innerHTML = '';
@@ -191,6 +243,9 @@ function openGroupModal(fid, col, gid){
             GMOD.gid = d.group.gid;
             GMOD.title = d.group.title || '';
             GMOD.thumb = d.group.thumb || '';
+            GMOD.verified = !!d.group.verified;
+            var vBox2 = document.getElementById('gmVerified');
+            if(vBox2) vBox2.checked = GMOD.verified;
             (d.group.members||[]).forEach(function(m){ GMOD.members.push(m); GMOD.fileMap[m.fid]=m; });
         } else {
             GMOD.title = d.title || '';
@@ -257,6 +312,8 @@ function gmUploadThumb(gid, file){
 function gmSave(){
     var title = document.getElementById('gmTitle').value.trim();
     if(!title){ showToast('Group ka naam likho','error'); return; }
+    var vBox = document.getElementById('gmVerified');
+    GMOD.verified = !!(vBox && vBox.checked);
     if(!GMOD.members.length && !GMOD.gid && !confirm('Group me koi file nahi hai. Khali group bana dein?')) return;
 
     var btn = document.getElementById('gmSaveBtn');
@@ -295,21 +352,64 @@ function gmDelete(){
         }).catch(function(){ showToast('Network error','error'); });
 }
 
-/* ── 🗂️ Group card ke thumbnail popup ke teen action ── */
-function grpManage(gid){
-    if(!gid) return;
-    openGroupModal(null, null, gid);
+/* ── 🗂️ Group card ke thumbnail popup ke actions ──
+   Sab actions card ke `key` se chalte hain (GRP_DATA map dashboard JS bharta hai),
+   taaki auto (bina-save) group bhi manage/verify/migrate ho sake. */
+function grpCard(k){ return (typeof GRP_DATA !== 'undefined' && GRP_DATA[k]) ? GRP_DATA[k] : null; }
+function grpMembers(g){ return (g.variants||[]).map(function(v){return {fid:v.file_id, col:v.raw_collection||'primary'};}); }
+
+function grpManage(k){
+    var g = grpCard(k);
+    if(!g) return;
+    if(g.gid){ openGroupModal(null, null, g.gid); return; }
+    var m = (g.variants||[])[0];
+    if(m) openGroupModal(m.file_id, m.raw_collection||'primary');
 }
 
-function grpMigrate(gid){
-    if(!gid) return;
-    openMigrateModal(gid);
+/* ✅ Verify: DB group ho to flag toggle, auto group ho to pehle save karke verify */
+function grpVerify(k){
+    var g = grpCard(k);
+    if(!g) return;
+    if(g.verified){
+        fetch('/api/group/verify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({gid:g.gid,verified:false})})
+            .then(function(r){return r.json();}).then(function(d){
+                if(!d.success){ showToast(d.error||'Verify failed','error'); return; }
+                showToast('Group unverified');
+                grpAfterChange();
+            }).catch(function(){ showToast('Network error','error'); });
+        return;
+    }
+    if(g.gid){
+        fetch('/api/group/verify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({gid:g.gid,verified:true})})
+            .then(function(r){return r.json();}).then(function(d){
+                if(!d.success){ showToast(d.error||'Verify failed','error'); return; }
+                showToast('\u2705 Group verified');
+                grpAfterChange();
+            }).catch(function(){ showToast('Network error','error'); });
+        return;
+    }
+    /* auto group — save karte waqt hi verified mark */
+    var body = {gid:'', title:g.raw_title||g.title||'', members:grpMembers(g), verified:true};
+    fetch('/api/group/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
+        .then(function(r){return r.json();}).then(function(d){
+            if(!d.success){ showToast(d.error||'Verify failed','error'); return; }
+            showToast('\u2705 Group verified');
+            grpAfterChange();
+        }).catch(function(){ showToast('Network error','error'); });
 }
 
-function grpDeleteGroup(gid){
-    if(!gid) return;
+/* 🔀 Migrate: is group (ya auto group) ki saari files kisi doosre group me merge */
+function grpMigrate(k){
+    var g = grpCard(k);
+    if(!g) return;
+    openMigrateModal(g.gid||'', grpMembers(g), g.raw_title||g.title||'');
+}
+
+function grpDeleteGroup(k){
+    var g = grpCard(k);
+    if(!g || !g.gid) return;
     if(!confirm('Ye group delete kar dein? Files delete nahi hongi, sirf grouping hat jayegi.')) return;
-    fetch('/api/group/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({gid:gid})})
+    fetch('/api/group/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({gid:g.gid})})
         .then(function(r){return r.json();}).then(function(d){
             if(!d.success){ showToast(d.error||'Delete failed','error'); return; }
             showToast('\u2705 Group deleted');
@@ -322,22 +422,26 @@ function grpAfterChange(){
     if(typeof refreshGridAfterEdit === 'function'){ refreshGridAfterEdit(); }
 }
 
-/* 🔀 Migrate: is group ki saari files kisi doosre group me merge */
-var GMIG = {gid:'', groups:[]};
+/* 🔀 Migrate: is group ki saari files kisi doosre group me merge (ID add) */
+var GMIG = {gid:'', groups:[], members:[], title:''};
 
-function openMigrateModal(gid){
-    if(!gid) return;
-    GMIG = {gid:gid, groups:[]};
+function openMigrateModal(gid, members, title){
+    GMIG = {gid:gid||'', groups:[], members:members||[], title:title||''};
     var el = document.getElementById('grpMigModal');
     if(!el) return;
+    if(!GMIG.gid && !GMIG.members.length) return;
     document.getElementById('grpMigQ').value = '';
-    document.getElementById('grpMigSrc').textContent = '';
+    document.getElementById('grpMigSrc').textContent = GMIG.title
+        ? 'Source: '+GMIG.title+(GMIG.members.length?' ('+GMIG.members.length+' files)':'')
+        : '';
     document.getElementById('grpMigList').innerHTML = '<div class="gm-empty">Loading&hellip;</div>';
     el.classList.add('open');
     fetch('/api/groups').then(function(r){return r.json();}).then(function(d){
-        GMIG.groups = (d.groups||[]).filter(function(g){return g.gid!==GMIG.gid;});
-        var src = (d.groups||[]).filter(function(g){return g.gid===GMIG.gid;})[0];
-        if(src){ document.getElementById('grpMigSrc').textContent = 'Source: '+src.title+' ('+src.count+' files)'; }
+        GMIG.groups = (d.groups||[]).filter(function(g){return !GMIG.gid || g.gid!==GMIG.gid;});
+        if(GMIG.gid && !GMIG.title){
+            var src = (d.groups||[]).filter(function(g){return g.gid===GMIG.gid;})[0];
+            if(src){ document.getElementById('grpMigSrc').textContent = 'Source: '+src.title+' ('+src.count+' files)'; }
+        }
         grpMigFilter();
     }).catch(function(){
         document.getElementById('grpMigList').innerHTML = '<div class="gm-empty">Groups load nahi hue.</div>';
@@ -357,18 +461,19 @@ function grpMigFilter(){
     var box = document.getElementById('grpMigList');
     if(!list.length){ box.innerHTML = '<div class="gm-empty">Koi doosra group nahi mila.</div>'; return; }
     box.innerHTML = list.map(function(g){
+        var vchip = g.verified ? ' &#10003;' : '';
         return '<div class="gm-mrow gm-migrow" onclick="grpMigDo(\\''+g.gid+'\\')">'+
             '<img class="gm-mthumb" src="'+gmEsc(g.thumb||'')+'" loading="lazy" onerror="this.style.visibility=\\'hidden\\'">'+
-            '<div class="gm-mbody"><div class="gm-mname">'+gmEsc(g.title)+'</div>'+
-            '<div class="gm-mmeta">'+g.count+' files</div></div>'+
+            '<div class="gm-mbody"><div class="gm-mname">'+gmEsc(g.title)+vchip+'</div>'+
+            '<div class="gm-mmeta">'+g.count+' files &middot; #'+gmEsc(String(g.gid||'').slice(-6))+'</div></div>'+
             '<button class="gm-add">&#128256; Merge</button></div>';
     }).join('');
 }
 
 function grpMigDo(target){
-    if(!GMIG.gid || !target) return;
-    var src = GMIG.gid;
-    fetch('/api/group/migrate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({gid:src,target:target})})
+    if(!target || (!GMIG.gid && !GMIG.members.length)) return;
+    var body = {gid:GMIG.gid||'', target:target, members:GMIG.members||[]};
+    fetch('/api/group/migrate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
         .then(function(r){return r.json();}).then(function(d){
             if(!d.success){ showToast(d.error||'Migrate failed','error'); return; }
             showToast('\u2705 Group migrated');

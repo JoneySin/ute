@@ -14,6 +14,11 @@ Grouping ke do source hain:
              naam wali files bhi jod di jaati hain. Manual group ke paas apna
              title + thumbnail hota hai aur nayi files uske `key` se auto-attach
              ho jaati hain (dobara grouping na karni pade).
+
+Grouping ka AADHAR (basis) admin chun sakta hai:
+  • quality — same title, saari qualities ek card (default / purana behaviour).
+  • episode — same episode ki qualities ek card (Show S01E01 → 480p+720p+1080p).
+  • season  — ek season ke saare episodes ek card (Show S01 → E01…E10).
 """
 
 import html as _html
@@ -29,18 +34,108 @@ _EXT_TAIL_RE = re.compile(
     r"[\s._\-]*(?<![A-Za-z0-9])(?:mp4|mkv|avi|mov|webm|m4v|ts|wmv|flv|mpg|mpeg)\s*$", re.I)
 _SEP_RE = re.compile(r"[\s|_\-–.,:;()\[\]{}+~!@#$%^&*=/\\'\"`<>?·•]+")
 
+# 🎞️ EPISODE / SEASON markers — "S01E02", "1x02", "Episode 2", "Season 1", "S01"
+_EP_FULL_RE = re.compile(
+    r"(?<![A-Za-z0-9])s(?:eason)?\s*\.?\s*0*(\d{1,2})\s*[._\-\s]*e(?:p|pisode)?\s*\.?\s*0*(\d{1,3})(?![A-Za-z0-9])",
+    re.I)
+_EP_X_RE = re.compile(r"(?<![A-Za-z0-9])0*(\d{1,2})\s*[xX]\s*0*(\d{1,3})(?![A-Za-z0-9])")
+_EP_ONLY_RE = re.compile(r"(?<![A-Za-z0-9])e(?:p|pisode)?\s*\.?\s*0*(\d{1,3})(?![A-Za-z0-9])", re.I)
+_SE_ONLY_RE = re.compile(
+    r"(?<![A-Za-z0-9])(?:s(?:eason)?)\s*\.?\s*0*(\d{1,2})(?![A-Za-z0-9])", re.I)
 
-def group_key(name):
-    """Quality/extension hata kar normalized key. Khali ho to '' (matlab group mat karo)."""
-    s = _EXT_TAIL_RE.sub("", str(name or ""))
-    s = _RES_TOKEN_RE.sub(" ", s).lower()
-    return _SEP_RE.sub(" ", s).strip()
+GROUP_BASES = ("quality", "episode", "season")
 
 
-def group_title(name):
-    """Dikhane layak saaf title (original case me), quality + extension hata kar."""
+def _clean_basis(basis):
+    basis = str(basis or "quality").lower()
+    return basis if basis in GROUP_BASES else "quality"
+
+
+def parse_episode(text):
+    """(season, episode, spans) — season/episode numbers + unke match spans.
+
+    Kuch na mile to (None, None, []). Sirf explicit markers pakde jaate hain
+    (S01E02 / 1x02 / Episode 2 / Season 1), taaki movie ke numbers galti se
+    episode na samajh liye jaayein.
+    """
+    s = str(text or "")
+    m = _EP_FULL_RE.search(s)
+    if m:
+        return int(m.group(1)), int(m.group(2)), [m.span()]
+    m = _EP_X_RE.search(s)
+    if m:
+        return int(m.group(1)), int(m.group(2)), [m.span()]
+
+    spans, season, episode = [], None, None
+    m = _SE_ONLY_RE.search(s)
+    if m:
+        season = int(m.group(1))
+        spans.append(m.span())
+    m = _EP_ONLY_RE.search(s)
+    if m:
+        episode = int(m.group(1))
+        spans.append(m.span())
+    return season, episode, spans
+
+
+def _strip_spans(text, spans):
+    for a, b in sorted(spans or [], reverse=True):
+        text = text[:a] + " " + text[b:]
+    return text
+
+
+def group_key(name, basis="quality"):
+    """Quality/extension hata kar normalized key. Khali ho to '' (matlab group mat karo).
+
+    basis:
+      • "quality" — Episode/Season marker title ka hissa hai (purana behaviour).
+      • "episode" — Same episode (S01E02 / 1x02 / Episode 2) ek hi key me.
+      • "season"  — Episode marker hata kar season (S01) ek key me; season na ho
+                    to saare episodes ek hi key me (poora show).
+    """
+    basis = _clean_basis(basis)
     s = _EXT_TAIL_RE.sub("", str(name or ""))
     s = _RES_TOKEN_RE.sub(" ", s)
+    if basis != "quality":
+        season, episode, spans = parse_episode(s)
+        if basis == "episode":
+            if episode:
+                s = _strip_spans(s, spans)
+                s = f"{s} s{season:02d}e{episode:02d}" if season else f"{s} e{episode:02d}"
+            elif season:                        # sirf season (S03 Complete) — wahi key rakho
+                s = _strip_spans(s, spans)
+                s = f"{s} s{season:02d}"
+        else:                                   # season
+            s = _strip_spans(s, spans)
+            if season:
+                s = f"{s} s{season:02d}"
+    return _SEP_RE.sub(" ", s.lower()).strip()
+
+
+def group_title(name, basis="quality"):
+    """Dikhane layak saaf title (original case me), quality + extension hata kar.
+
+    basis ke hisaab se episode/season marker canonical form me rakha jaata hai:
+      • quality → jaise likha hai waise hi ("Show S01E02")
+      • episode → "Show S01E02"
+      • season  → "Show S01"
+    """
+    basis = _clean_basis(basis)
+    s = _EXT_TAIL_RE.sub("", str(name or ""))
+    s = _RES_TOKEN_RE.sub(" ", s)
+    if basis != "quality":
+        season, episode, spans = parse_episode(s)
+        if spans and (episode or season):
+            if basis == "episode":
+                if episode:
+                    token = f"S{season:02d}E{episode:02d}" if season else f"E{episode:02d}"
+                else:
+                    token = f"S{season:02d}"
+            else:                               # season
+                token = f"S{season:02d}" if season else ""
+            s = _strip_spans(s, spans)
+            if token:
+                s = f"{s} {token}"
     s = re.sub(r"([|\-–_.])(\s*\1)+", r"\1", s)          # '| |' / '..' jaise doble separator
     s = re.sub(r"\s+", " ", s)
     s = re.sub(r"^[\s|\-–_.]+|[\s|\-–_.]+$", "", s)
@@ -86,6 +181,16 @@ def _copy(d, **extra):
     return out
 
 
+def _episode_count(variants):
+    """Variants me kitne alag episodes hain (season grouping ka label)."""
+    seen = set()
+    for d in variants or []:
+        se, ep, _ = parse_episode(d.get("name"))
+        if ep:
+            seen.add((se or 0, ep))
+    return len(seen)
+
+
 def _chips_and_labels(variants):
     chips, seen, labels = [], {}, []
     for d in variants:
@@ -104,11 +209,12 @@ def _chips_and_labels(variants):
 # ─────────────────────────────────────────────────────────
 # 🧩 CORE: results → cards
 # ─────────────────────────────────────────────────────────
-def build_groups(results, manual=None):
+def build_groups(results, manual=None, basis="quality"):
     """Results list ko group cards me badalta hai.
 
     results : web result dicts (ranking order me, `file_id` ke saath)
-    manual  : {gid: {"gid", "title", "key", "thumb", "members": [fid...],
+    basis   : "quality" | "episode" | "season" — grouping ka aadhar
+    manual  : {gid: {"gid", "title", "key", "thumb", "verified", "members": [fid...],
                      "variants": [result dict...]}}
               (manual group ke saare saved members ke result dicts — chahe wo is
                page par hon ya na hon — plus admin ka diya title/thumbnail)
@@ -123,6 +229,7 @@ def build_groups(results, manual=None):
                         "type", "tg_thumb", "chips", "labels", "variants", "_first"}
       • manual group → same + {"gid", "manual": True, "tg_thumb": /api/group_thumb…}
     """
+    basis = _clean_basis(basis)
     manual = manual or {}
 
     fid_to_gid, key_to_gid = {}, {}
@@ -141,7 +248,7 @@ def build_groups(results, manual=None):
         fid = r.get("file_id")
         gid = fid_to_gid.get(fid)
         if not gid:
-            k = group_key(r.get("name"))
+            k = group_key(r.get("name"), basis)
             gid = key_to_gid.get(k) if k else None
         if gid:
             if gid not in manual_seen:
@@ -150,7 +257,7 @@ def build_groups(results, manual=None):
             manual_seen[gid].append((idx, r))
             continue
 
-        k = group_key(r.get("name"))
+        k = group_key(r.get("name"), basis)
         if not k:
             order.append(("single", idx))
             continue
@@ -195,7 +302,7 @@ def build_groups(results, manual=None):
 
             master = page_rows[0] if page_rows else variants[0]
             chips, labels = _chips_and_labels(vlist)
-            title = str(g.get("title") or "").strip() or group_title(master.get("name")) \
+            title = str(g.get("title") or "").strip() or group_title(master.get("name"), basis) \
                 or str(master.get("name") or "")
             thumb = str(g.get("thumb") or "").strip() or master.get("tg_thumb") or ""
             out.append({
@@ -204,6 +311,10 @@ def build_groups(results, manual=None):
                 "gid": str(g.get("gid") or v),
                 "key": str(g.get("gid") or v),
                 "title": _html.escape(title),
+                "raw_title": title,
+                "verified": bool(g.get("verified")),
+                "basis": basis,
+                "ep_count": _episode_count(vlist),
                 "count": len(vlist),
                 "type": str(master.get("type") or "VIDEO").upper(),
                 "tg_thumb": thumb,
@@ -228,7 +339,7 @@ def build_groups(results, manual=None):
         vlist = [d for _, d in labelled]
         chips, labels = _chips_and_labels(vlist)
         master = items[0][1]
-        title = group_title(master.get("name")) or str(master.get("name") or "")
+        title = group_title(master.get("name"), basis) or str(master.get("name") or "")
         # master thumbnail = ranking me pehli (best match) file ka poster, warna koi bhi
         thumb = master.get("tg_thumb") or next((d.get("tg_thumb") for d in vlist if d.get("tg_thumb")), "")
         out.append({
@@ -237,6 +348,10 @@ def build_groups(results, manual=None):
             "gid": "",
             "key": _card_key(v),
             "title": _html.escape(title),
+            "raw_title": title,
+            "verified": False,
+            "basis": basis,
+            "ep_count": _episode_count(vlist),
             "count": len(vlist),
             "type": str(master.get("type") or "VIDEO").upper(),
             "tg_thumb": thumb,

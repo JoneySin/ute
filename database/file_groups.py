@@ -11,8 +11,12 @@ Doc schema (collection: FileGroups):
       "key":       str,             # auto-group key (nayi same-title files auto attach)
       "thumb_url": "TG_ID:..." | "",# custom master thumbnail (editable)
       "members":   [{"fid": str, "col": "primary|cloud|archive"}, ...],
+      "verified":  bool,            # admin ne check karke "haan ye group sahi hai" kaha
       "created_on": float, "updated_on": float
     }
+
+`verified` sirf admin ka bharosa hai: auto (bina verify) groups ko UI "unverified"
+dikhata hai. Group ID har group ke paas hota hai, lekin bharosemand sirf verified.
 
 Ek file sirf EK manual group me rah sakti hai — `add` karte waqt baaki groups se
 $pull kar diya jaata hai (web/group_routes.py isi helper ko use karta hai).
@@ -107,13 +111,14 @@ async def get_group_raw(gid):
     return await file_groups.find_one({"_id": str(gid)})
 
 
-async def create_group(title, members=None, thumb_url="", key=""):
+async def create_group(title, members=None, thumb_url="", key="", verified=False):
     now = time.time()
     doc = {
         "title": str(title or "").strip(),
         "key": str(key or "").strip(),
         "thumb_url": str(thumb_url or "").strip(),
         "members": clean_members(members),
+        "verified": bool(verified),
         "created_on": now,
         "updated_on": now,
     }
@@ -123,7 +128,7 @@ async def create_group(title, members=None, thumb_url="", key=""):
     return doc
 
 
-async def update_group(gid, title=None, thumb_url=None, key=None):
+async def update_group(gid, title=None, thumb_url=None, key=None, verified=None):
     oid = _oid(gid)
     if not oid:
         return None
@@ -134,6 +139,8 @@ async def update_group(gid, title=None, thumb_url=None, key=None):
         payload["thumb_url"] = str(thumb_url).strip()
     if key is not None:
         payload["key"] = str(key).strip()
+    if verified is not None:
+        payload["verified"] = bool(verified)
     await file_groups.update_one({"_id": oid}, {"$set": payload})
     return await file_groups.find_one({"_id": oid})
 
@@ -150,6 +157,11 @@ async def set_members(gid, members):
         {"$set": {"members": clean, "updated_on": time.time()}},
     )
     return await file_groups.find_one({"_id": oid})
+
+
+async def set_verified(gid, verified=True):
+    """Admin verify/unverify — sirf flag badalta hai (title/members waise hi)."""
+    return await update_group(gid, verified=bool(verified))
 
 
 async def delete_group(gid):

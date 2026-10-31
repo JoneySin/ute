@@ -5,7 +5,8 @@ Admin yahan se:
   • group ka naam ya master thumbnail badal sakta hai,
   • alag-alag naam wali files ko search karke group me jod sakta hai,
   • member nikaal sakta hai / poora group delete kar sakta hai,
-  • ek group ki saari files doosre group me migrate (merge) kar sakta hai.
+  • ek group ki saari files doosre group me migrate (merge) kar sakta hai,
+  • group ko "verified" mark kar sakta hai (sirf verified id hi bharosemand hai).
 
 Sab kuch MongoDB (FileGroups) me save hota hai — dobara grouping nahi karni padti.
 Search results me ye groups web/search_api.py ke `_manual_groups_for()` se merge
@@ -88,6 +89,7 @@ def _payload(g, rows):
         "key": g.get("key") or "",
         "thumb": _group_thumb_url(g),
         "custom_thumb": bool(str(g.get("thumb_url") or "").strip()),
+        "verified": bool(g.get("verified")),
         "count": len(rows),
         "members": rows,
         "updated_on": g.get("updated_on") or 0,
@@ -323,6 +325,8 @@ async def api_group_save(req):
     gid = str(data.get("gid") or "").strip()
     title = str(data.get("title") or "").strip()
     members = fg.clean_members(data.get("members"))
+    verified = data.get("verified", None)          # None = jo hai wahi rehne do
+    verified = None if verified is None else bool(verified)
 
     if not title:
         return web.json_response({"error": "Group name is required!"}, status=400, dumps=fast_json)
@@ -345,15 +349,15 @@ async def api_group_save(req):
             if not g:
                 return web.json_response({"error": "Group not found!"}, status=404, dumps=fast_json)
             await fg.set_members(gid, members)
-            g = await fg.update_group(gid, title=title, key=key)
+            g = await fg.update_group(gid, title=title, key=key, verified=verified)
         else:
             # same key ka manual group pehle se hai → duplicate card banane ki jagah usi me merge
             existing = await fg.find_by_key(key) if key else None
             if existing:
                 await fg.set_members(str(existing["_id"]), members)
-                g = await fg.update_group(str(existing["_id"]), title=title, key=key)
+                g = await fg.update_group(str(existing["_id"]), title=title, key=key, verified=verified)
             else:
-                g = await fg.create_group(title, members, key=key)
+                g = await fg.create_group(title, members, key=key, verified=bool(verified))
 
         _clear_search_caches()
         return web.json_response({"success": True, "group": await _group_payload(g)}, dumps=fast_json)
@@ -425,6 +429,31 @@ async def api_group_delete(req):
     return web.json_response({"success": ok}, dumps=fast_json)
 
 
+@group_routes.post("/api/group/verify")
+async def api_group_verify(req):
+    """Admin ka bharosa (verified) flag on/off — group id ko "official" banata hai."""
+    role, _ = await get_user_role(req)
+    if role != "admin":
+        return _forbidden()
+
+    try:
+        data = await req.json()
+    except Exception:
+        return web.json_response({"error": "Invalid payload!"}, status=400, dumps=fast_json)
+
+    gid = str(data.get("gid") or "").strip()
+    if not gid:
+        return web.json_response({"error": "Missing group id!"}, status=400, dumps=fast_json)
+
+    g = await fg.get_group(gid)
+    if not g:
+        return web.json_response({"error": "Group not found!"}, status=404, dumps=fast_json)
+
+    g = await fg.set_verified(gid, bool(data.get("verified", True)))
+    _clear_search_caches()
+    return web.json_response({"success": True, "group": await _group_payload(g)}, dumps=fast_json)
+
+
 @group_routes.post("/api/group/migrate")
 async def api_group_migrate(req):
     """Source group ki saari files target group me merge karke source delete.
@@ -443,26 +472,37 @@ async def api_group_migrate(req):
 
     gid = str(data.get("gid") or "").strip()
     target = str(data.get("target") or "").strip()
-    if not gid or not target:
-        return web.json_response({"error": "Missing group id!"}, status=400, dumps=fast_json)
+    if not target:
+        return web.json_response({"error": "Missing target group id!"}, status=400, dumps=fast_json)
     if gid == target:
         return web.json_response({"error": "Same group me migrate nahi kar sakte!"}, status=400, dumps=fast_json)
 
     try:
-        src = await fg.get_group(gid)
         dst = await fg.get_group(target)
-        if not src or not dst:
+        if not dst:
             return web.json_response({"error": "Group not found!"}, status=404, dumps=fast_json)
+
+        if gid:
+            src = await fg.get_group(gid)
+            if not src:
+                return web.json_response({"error": "Group not found!"}, status=404, dumps=fast_json)
+            src_members = fg.clean_members(src.get("members"))
+        else:
+            # DB me save na hua (auto) group: card ke members hi source hain
+            src_members = fg.clean_members(data.get("members"))
+            if not src_members:
+                return web.json_response({"error": "Group me koi file nahi mili!"}, status=400, dumps=fast_json)
 
         members = fg.clean_members(dst.get("members"))
         seen = {m["fid"] for m in members}
-        for m in fg.clean_members(src.get("members")):
+        for m in src_members:
             if m["fid"] not in seen:
                 seen.add(m["fid"])
                 members.append(m)
 
         g = await fg.set_members(target, members)
-        await fg.delete_group(gid)
+        if gid:
+            await fg.delete_group(gid)
         _clear_search_caches()
         return web.json_response({"success": True, "group": await _group_payload(g)}, dumps=fast_json)
     except Exception as e:
@@ -478,8 +518,10 @@ _GROUPS_PAGE_HTML = """
     <div>
       <div class="gm-page-title">&#128451; Quality Groups</div>
       <div class="gm-page-sub">Yahan se master group ka naam / thumbnail badlo, alag naam wali files jodo,
-      member hatao ya group delete karo. Sab kuch DB me save rehta hai &mdash; grouping dobara nahi karni padegi.
-      Search grid me group card normal file jitna bada dikhta hai aur thumbnail ke andar neeche qualities ki ginti likhi hoti hai.</div>
+      member hatao ya group delete karo. Har group ka apna &#128279; ID hota hai &mdash; do group ek jaise hon to
+      <b>Migrate</b> se ek ID doosre me daal do, dono ek group ban jayenge.
+      <b>&#9989; Verified</b> wahi group maana jayega jise admin ne khud check karke tick kiya ho;
+      baaki groups auto-detect hue hain, unme galti ho sakti hai.</div>
     </div>
     <button class="gm-new-btn" onclick="openGroupModal(null,null,null)">&#10133; New Group</button>
   </div>
@@ -491,8 +533,13 @@ _GROUPS_PAGE_JS = """<script>
 function gmGroupCard(g){
     var labels=[];
     (g.members||[]).forEach(function(m){ if(m.ql && labels.indexOf(m.ql)===-1) labels.push(m.ql); });
+    var vchip = g.verified
+        ? '<span class="gm-vchip ok">&#10003; VERIFIED</span>'
+        : '<span class="gm-vchip warn">&#9888; UNVERIFIED</span>';
+    var idchip = '<span class="gm-idchip">#'+gmEsc(String(g.gid||'').slice(-6))+'</span>';
     return '<div class="gm-gcard" onclick="openGroupModal(null,null,\\''+g.gid+'\\')">'+
         '<div class="gm-gposter"><img src="'+g.thumb+'" loading="lazy" onerror="this.style.display=\\'none\\'">'+
+        '<div class="gm-gtop">'+vchip+idchip+'</div>'+
         '<div class="gm-gbadge"><span>&#127916; '+g.count+' '+(g.count===1?'Quality':'Qualities')+'</span></div></div>'+
         '<div class="gm-gbody"><div class="gm-gname">'+gmEsc(g.title)+'</div>'+
         '<div class="gm-gmeta">'+labels.map(function(l){return '<b>'+gmEsc(l)+'</b>';}).join('')+'</div></div></div>';

@@ -23,7 +23,7 @@ from media_probe import probe_telegram_file, should_probe_media
 from database.users_chats_db import db
 # 🗂️ MANUAL QUALITY GROUPS — admin ke banaye groups (DB me persist) + unke rules
 from database import file_groups as fg
-from web.grouping import build_groups, group_key, plan_page, strip_internal
+from web.grouping import build_groups, group_key, plan_page, strip_internal, GROUP_BASES
 # ✅ SYNC FIX: cookie-session identity check अब यहाँ दोबारा नहीं लिखा, web_assets से reuse हो रहा है
 # ✅ DRY: fast_json भी अब web_assets से ही आता है (पहले search_api/actor_routes/
 # post_routes तीनों में इसकी अलग-अलग copy थी)।
@@ -413,15 +413,17 @@ async def _manual_groups_for(results, mode):
             "title": g.get("title") or "",
             "key": g.get("key") or "",
             "thumb": _group_thumb_url(g),
+            "verified": bool(g.get("verified")),
             "members": [m["fid"] for m in members],
             "variants": variants,
         }
     return out
 
 
-async def _grouped_page(q, col, mode, offset, target, recent=False):
+async def _grouped_page(q, col, mode, offset, target, recent=False, basis="quality"):
     """Grouped search ka ek page — `target` jitne CARD (single + group) lautata hai.
 
+    `basis` = grouping ka aadhar: quality (default) / episode / season.
     Return: (cards, next_offset) — next_offset raw-doc offset hai (dashboard ise
     `offset` ki tarah wapas bhejta hai), '' matlab aur pages nahi hain.
     """
@@ -441,7 +443,7 @@ async def _grouped_page(q, col, mode, offset, target, recent=False):
             next_raw = ""
 
         results = _build_results_list(raw_docs, mode)
-        cards = build_groups(results, await _manual_groups_for(results, mode))
+        cards = build_groups(results, await _manual_groups_for(results, mode), basis)
 
         if len(cards) > target or not next_raw or len(raw_docs) >= GROUP_MAX_RAW:
             break
@@ -468,6 +470,11 @@ async def api_search(req):
     col = req.query.get("col", "all").lower()
     mode = req.query.get("mode", DEFAULT_MEDIA_MODE).lower()
     want_group = req.query.get("group", "") == "1"     # dashboard hi bhejta hai; baaki users raw list
+    # 🧩 GROUPING BASIS — sirf admin chun sakta hai (quality / episode / season).
+    # Aam users par hamesha purana "quality" behaviour hi chalta hai.
+    basis = (req.query.get("gbasis") or "quality").lower()
+    if role != "admin" or basis not in GROUP_BASES:
+        basis = "quality"
 
     if col != "all" and col not in COLLECTIONS:
         col = "all"
@@ -484,7 +491,7 @@ async def api_search(req):
     # सबसे नई अपलोड की गई फाइलें (Recently Added) दिखाओ
     if not q:
         if want_group:
-            cards, next_offset = await _grouped_page("", col, mode, off, lim, recent=True)
+            cards, next_offset = await _grouped_page("", col, mode, off, lim, recent=True, basis=basis)
             return web.json_response({
                 "results": cards,
                 "total": off + len(cards) + (1 if next_offset else 0),
@@ -506,7 +513,7 @@ async def api_search(req):
     # ── GROUPED MODE (dashboard) ──────────────────────────────
     # Har page par 21 CARD aate hain (na ki 21 files jo 5-6 group me simat jaayein).
     if want_group:
-        trend_key = f"G|{col}|{mode}|{q.lower()}"
+        trend_key = f"G|{col}|{mode}|{basis}|{q.lower()}"
         if off == 0:
             cached = TRENDING_CACHE.get(trend_key)
             if cached and cached.get("expiry", 0) > time.time():
@@ -515,9 +522,10 @@ async def api_search(req):
                     "total": len(cached["cards"]) + (1 if cached["next_offset"] else 0),
                     "next_offset": cached["next_offset"],
                     "is_admin": role == "admin",
+                    "basis": basis,
                 }, dumps=fast_json)
 
-        cards, next_offset = await _grouped_page(q, col, mode, off, lim)
+        cards, next_offset = await _grouped_page(q, col, mode, off, lim, basis=basis)
 
         if off == 0 and cards:
             TRENDING_CACHE[trend_key] = {
@@ -532,6 +540,7 @@ async def api_search(req):
             "total": off + len(cards) + (1 if next_offset else 0),
             "next_offset": next_offset,
             "is_admin": role == "admin",
+            "basis": basis,
         }, dumps=fast_json)
 
     # ── RAW MODE (miniapp/other clients) ──────────────────────

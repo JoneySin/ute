@@ -500,25 +500,16 @@ async def api_search(req):
     if not q:
         recent_docs, recent_next_offset = await get_recent_files(lim, offset=off, collection_type=col)
         results_list = _build_results_list(recent_docs, mode)
-        if want_group:
-            # ग्रुपिंग वरिएंट्स को collapse करके एक कार्ड बनाती है।
-            # ग्रुप के बाद कार्ड कम रह सकते हैं, पर सर्च काम करेगी।
-            grouped = group_results(results_list)
-            display_items = grouped
-            final_next = recent_next_offset
-        else:
-            display_items = results_list
-            final_next = recent_next_offset
+        has_more = bool(recent_next_offset)
         return web.json_response({
-            "results": display_items,
-            "total": off + len(display_items) + (1 if bool(final_next) else 0),
-            "next_offset": final_next,
+            "results": group_results(results_list) if want_group else results_list,
+            "total": off + len(results_list) + (1 if has_more else 0),
+            "next_offset": recent_next_offset,
             "is_admin": role == "admin",
             "is_recent": True,
         }, dumps=fast_json)
 
-    # ट्रेंडिंग कैश सिर्फ़ बिना-ग्रुपिंग सर्च के लिए (ग्रुपिंग में रिजल्ट collapse होते हैं)
-    if off == 0 and not want_group:
+    if off == 0:
         trend_key = f"{col}_{mode}_{q.lower()}"
         now_ts = time.time()
         if trend_key in TRENDING_CACHE and TRENDING_CACHE[trend_key]["expiry"] > now_ts:
@@ -528,7 +519,7 @@ async def api_search(req):
                 asyncio.create_task(bg_prefetch_worker(tg_id, q, col, mode, cached["next_offset"], lim))
 
             return web.json_response({
-                "results": cached["results"],
+                "results": group_results(cached["results"]) if want_group else cached["results"],
                 "total": off + len(cached["results"]) + (1 if cached["next_offset"] else 0),
                 "next_offset": cached["next_offset"],
                 "is_admin": role == "admin"
@@ -554,7 +545,7 @@ async def api_search(req):
 
     results_list = _build_results_list(all_m, mode)
 
-    if off == 0 and results_list and not want_group:
+    if off == 0 and results_list:
         trend_key = f"{col}_{mode}_{q.lower()}"
         TRENDING_CACHE[trend_key] = {
             "results": results_list,
@@ -562,36 +553,10 @@ async def api_search(req):
             "expiry": time.time() + TRENDING_CACHE_TTL
         }
 
-    if want_group:
-        # ग्रुपिंग वरिएंट्स collapse करके एक कार्ड बनाती है, इसलिए lim डिस्प्ले
-        # कार्ड पाने के लिए ज़रूरत पड़ने पर एक से ज़्यादा बैच फेच करें
-        all_docs = []
-        cursor_offset = off
-        max_fetch = lim * 3  # सुरक्षा: ज़्यादा से ज़्यादा 3 बैच
-
-        while len(all_docs) < max_fetch:
-            batch, batch_next, _, _ = await get_search_results(
-                q, lim, offset=cursor_offset, collection_type=col, bypass_count=True
-            )
-            if not batch:
-                break
-            all_docs.extend(batch)
-            if not batch_next:
-                break
-            cursor_offset = batch_next
-
-        results_list = _build_results_list(all_docs, mode)
-        grouped = group_results(results_list)
-        display_items = grouped[:lim]
-        final_next = cursor_offset if len(grouped) >= lim else ""
-    else:
-        display_items = results_list
-        final_next = next_offset
-
     return web.json_response({
-        "results": display_items,
-        "total": off + len(display_items) + (1 if bool(final_next) else 0),
-        "next_offset": final_next,
+        "results": group_results(results_list) if want_group else results_list,
+        "total": off + len(results_list) + (1 if has_more else 0),
+        "next_offset": next_offset,
         "is_admin": role == "admin",
     }, dumps=fast_json)
 

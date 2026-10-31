@@ -1,3 +1,4 @@
+import json
 import time
 from aiohttp import web
 from web.web_assets import build_page, get_auth, form_wrapper, MAX_WEB_RESULTS, require_active_plan, DEFAULT_MEDIA_MODE
@@ -97,6 +98,10 @@ CARD_CSS = """
 .grp-vchip.ok{background:rgba(16,120,60,.9);border:1px solid rgba(60,220,130,.5);color:#d1ffe4}
 .grp-vchip.warn{background:rgba(150,105,10,.9);border:1px solid rgba(255,209,102,.5);color:#ffe9b0}
 .grp-vchip.auto{background:rgba(60,66,80,.9);border:1px solid rgba(255,255,255,.25);color:#dfe4ee}
+/* 🏷️ custom quality name chips (Sky / UnTuch / FreeMasx / Mydesi) */
+.brand-chip{background:rgba(60,20,120,.85)!important;color:#d8c7ff!important;border:1px solid rgba(150,110,255,.45)!important}
+.brand-text{color:#c4b5fd!important}
+.grp-qlabel.grp-brand{background:rgba(60,20,120,.82);color:#d8c7ff;border-color:rgba(150,110,255,.5)}
 .grp-variants{display:none;border-top:1px solid var(--border);background:var(--bg2)}
 .grp-card.open .grp-variants{display:grid;grid-template-columns:1fr;gap:8px;padding:10px}
 @media(min-width:600px){.grp-card.open .grp-variants{grid-template-columns:repeat(3,1fr)}}
@@ -121,7 +126,7 @@ var curQ='',curOff=0,nextOff='',curCol='all',curPage=1;
    bhi admin ki chuni hui basis par ho (server non-admin par quality force karta hai). */
 var gbasis='quality';
 try{var _sb=localStorage.getItem('ff_dashboard_basis');
-    if(_sb==='quality'||_sb==='episode'||_sb==='season'){gbasis=_sb;}}catch(e){}
+    if(_sb==='quality'||_sb==='episode'||_sb==='season'||_sb==='source'){gbasis=_sb;}}catch(e){}
 /* group card ka poora data (key → card) — popup actions isi se chalte hain */
 var GRP_DATA={};
 var searchReqId=0;
@@ -200,6 +205,9 @@ function pickBasis(val,label,el,e){
     var menu=document.getElementById('cddBasisMenu'),btn=document.getElementById('cddBasisBtn');
     if(menu) menu.style.display='none';
     if(btn) btn.classList.remove('open');
+    if(val==='source' && !(window.RELEASE_TAGS||[]).length){
+        showToast('Pehle "Quality Groups" page par apni quality names (Sky / UnTuch…) add karo','error');
+    }
     doSearch(0,true);
 }
 
@@ -247,6 +255,8 @@ function cardHtml(f,nested){
             /* 🖼️ Resolution chip (1280×720 → "720p", 1920×1080 → "1080p") — duration chip
                jaisa hi null-tolerant: data na ho to chip banta hi nahi. */
             var resChip  = f.res ? '<span class="res-chip">'+f.res+'</span>' : '';
+            /* 🏷️ admin ka custom quality name (Sky / UnTuch / FreeMasx / Mydesi…) */
+            var brandChip = f.brand ? '<span class="res-chip brand-chip">'+f.brand+'</span>' : '';
             var resText  = f.res ? '<span class="tc-res">'+f.res+'</span>' : '';
 
             var posterHtml='';
@@ -256,7 +266,7 @@ function cardHtml(f,nested){
                     '<div class="poster-top">'+
                         '<span class="type-chip">'+f.type.toUpperCase()+'</span>'+
                         '<span class="size-chip">'+f.size+'</span>'+
-                        durChip+resChip+
+                        durChip+resChip+brandChip+
                         '<span class="source-pill '+sc+'"><span class="source-dot"></span>'+sc.toUpperCase()+'</span>'+
                     '</div>'+
                     adminBtns+
@@ -268,7 +278,7 @@ function cardHtml(f,nested){
                 textInfo='<div class="fc-text-info" onclick="toggleAdminBtns(this.closest(\\'.file-card\\'),event)">'+
                     '<span class="tc-type">'+f.type.toUpperCase()+'</span>'+
                     '<span class="tc-size">'+f.size+'</span>'+
-                    durText+resText+
+                    durText+resText+(f.brand?'<span class="tc-res brand-text">'+f.brand+'</span>':'')+
                     '<span class="source-pill '+sc+'" style="margin-left:auto"><span class="source-dot"></span>'+sc.toUpperCase()+'</span>'+
                 '</div>';
                 if(isAdminView){
@@ -300,6 +310,10 @@ function groupHtml(g){
     var open=openGroups[g.key]?' open':'';
     var vlist=g.variants||[];
     var labels=(g.labels||[]).map(function(l){return '<span class="grp-qlabel">'+l+'</span>';}).join('');
+    /* 🏷️ custom quality names (Sky / UnTuch / FreeMasx / Mydesi) — labels me pehle hi
+       "Sky 1080p" ki tarah aa jaate hain; alag brand chips bhi dikha dete hain. */
+    var brands=g.brands||[];
+    var brandLabels=brands.map(function(b){return '<span class="grp-qlabel grp-brand">'+b+'</span>';}).join('');
     var labelsText=(g.labels||[]).join(' · ');
     var basis=g.basis||'quality';
     var epCount=parseInt(g.ep_count,10)||0;
@@ -338,7 +352,7 @@ function groupHtml(g){
             '</div>'+
             '<div class="grp-qbar">'+
                 '<span class="grp-qcount">&#127916; '+g.count+' '+qWord+'</span>'+
-                '<span class="grp-qlabels">'+labels+'</span>'+
+                '<span class="grp-qlabels">'+(brandLabels||labels)+'</span>'+
             '</div>'+
             adminBtns+
         '</div>';
@@ -547,9 +561,17 @@ async def dash(req):
 
     body = DASHBOARD_BODY
     if role == "admin":
+        # 🏷️ admin ke custom quality names page me daal do — "Source" basis chunte
+        # waqt JS ko pata rahe ki tags set hain ya nahi.
+        try:
+            from web.search_api import get_release_tags
+            tags = await get_release_tags()
+        except Exception:
+            tags = []
+        tags_js = f"<script>window.RELEASE_TAGS={json.dumps(tags)};</script>"
         # Group modal + shortcut sirf admin ke page par (users ko extra JS/CSS nahi)
         body = (DASHBOARD_BODY.replace("<!--GBASIS-->", GROUP_BASIS_HTML)
-                + GROUP_UI_CSS + GROUP_MODAL_HTML + GROUP_MIGRATE_HTML + GROUP_UI_JS
+                + tags_js + GROUP_UI_CSS + GROUP_MODAL_HTML + GROUP_MIGRATE_HTML + GROUP_UI_JS
                 + '<a href="/groups" class="dash-groups-fab" title="Saare quality groups manage karo">'
                   '<span style="font-size:15px">&#128451;</span> Quality Groups</a>')
     return build_page("Home - Fast Finder", body, "", "dash", role)

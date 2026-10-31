@@ -74,10 +74,126 @@ GROUP_UI_CSS = """<style>
 .gm-vrow input{margin-top:2px;accent-color:var(--accent);width:15px;height:15px;flex-shrink:0;cursor:pointer}
 .gm-vrow b{font-size:12px;display:block;color:var(--text)}
 .gm-vrow span{font-size:10.5px;color:var(--muted);line-height:1.5}
+/* 🏷️ custom quality names panel (/groups page) */
+.gm-tagpanel{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:13px 14px;margin-bottom:18px}
+.gm-taghead{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:9px}
+.gm-tagtitle{font-size:13px;font-weight:900;color:var(--text)}
+.gm-tagsub{font-size:10.5px;color:var(--muted);line-height:1.55;max-width:640px}
+.gm-taglist{display:flex;flex-wrap:wrap;gap:6px;margin:10px 0 4px}
+.gm-tag{display:inline-flex;align-items:center;gap:6px;background:var(--bg3);border:1px solid var(--border);border-radius:999px;padding:4px 6px 4px 11px;font-size:11px;font-weight:800;color:#ffd166}
+.gm-tag button{background:rgba(160,8,8,.75);border:1px solid rgba(229,9,20,.4);color:#fff;border-radius:999px;width:18px;height:18px;font-size:10px;line-height:1;cursor:pointer;padding:0}
+.gm-tagadd{display:flex;gap:8px;margin-top:8px}
+.gm-tagadd .em-input{margin-bottom:0;flex:1}
+.gm-tagadd button{background:var(--accent);border:0;color:#fff;border-radius:8px;padding:0 16px;font-weight:800;font-size:12px;cursor:pointer;white-space:nowrap}
+.gm-tagscan{font-size:10.5px;color:var(--muted);margin-top:8px;line-height:1.6}
+.gm-tagscan b{color:#ffd166}
 /* 🧩 basis dropdown 2 dropdown ke saath fit ho — mobile par wrap */
 #cddBasisWrap .cdd-btn{max-width:44vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 @media(max-width:560px){.search-row2{flex-wrap:wrap;row-gap:8px}}
 </style>"""
+
+
+# 🏷️ CUSTOM QUALITY NAMES panel — /groups page par sabse upar (admin ki apni
+# quality names: Sky, UnTuch, FreeMasx, Mydesi…). Ye naam grouping me resolution
+# ki tarah treat hote hain: naam se hat jaate hain aur label me dikhte hain.
+GROUP_TAGS_HTML = """
+<div class="gm-tagpanel">
+    <div class="gm-taghead">
+        <div>
+            <div class="gm-tagtitle">&#127991; Meri Quality Names</div>
+            <div class="gm-tagsub">Jaise <b>Sky</b>, <b>UnTuch</b>, <b>FreeMasx</b>, <b>Mydesi</b>.
+            Ye naam filename me jahan bhi mile, grouping inhe quality maan kar ek hi card me daal degi
+            (jaise 1080p/720p) aur thumbnail ke labels me dikhayegi &mdash;
+            e.g. <b>Sky 1080p</b>, <b>UnTuch 720p</b>.</div>
+        </div>
+    </div>
+    <div class="gm-taglist" id="gmTagList"></div>
+    <div class="gm-tagadd">
+        <input type="text" id="gmTagInput" class="em-input" placeholder="Naya naam likho (e.g. Sky)" onkeydown="if(event.key==='Enter'){event.preventDefault();gmTagAdd();}">
+        <button onclick="gmTagAdd()">&#10133; Add</button>
+    </div>
+    <div class="gm-tagadd" style="margin-top:10px">
+        <input type="text" id="gmTagScanInput" class="em-input" placeholder="Title likho (e.g. Movie 2025) &mdash; dekho kaunsi quality mili" onkeydown="if(event.key==='Enter'){event.preventDefault();gmTagScan();}">
+        <button onclick="gmTagScan()">&#128269; Check</button>
+    </div>
+    <div class="gm-tagscan" id="gmTagScan"></div>
+</div>
+<script>
+var GMTAGS = [];
+
+function gmTagChips(){
+    var box = document.getElementById('gmTagList');
+    if(!box) return;
+    box.innerHTML = GMTAGS.length
+        ? GMTAGS.map(function(t){
+            return '<span class="gm-tag">'+gmEsc(t)+
+                '<button title="Hatao" data-t="'+gmEsc(t)+'" onclick="gmTagRemove(this.getAttribute(\\'data-t\\'))">&#10005;</button></span>';
+        }).join('')
+        : '<span class="gm-tagsub">Abhi koi custom quality name nahi &mdash; neeche se add karo.</span>';
+}
+
+function gmTagLoad(){
+    var box = document.getElementById('gmTagList');
+    if(!box) return;
+    fetch('/api/group/tags').then(function(r){return r.json();}).then(function(d){
+        GMTAGS = d.tags || [];
+        gmTagChips();
+    }).catch(function(){ box.innerHTML = '<span class="gm-tagsub">Tags load nahi hue.</span>'; });
+}
+
+function gmTagSave(body){
+    return fetch('/api/group/tags',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
+        .then(function(r){return r.json();}).then(function(d){
+            if(!d.success){ showToast(d.error||'Save failed','error'); return false; }
+            GMTAGS = d.tags || [];
+            gmTagChips();
+            return true;
+        }).catch(function(){ showToast('Network error','error'); return false; });
+}
+
+function gmTagAdd(){
+    var inp = document.getElementById('gmTagInput');
+    var v = (inp && inp.value || '').trim();
+    if(!v){ showToast('Naam likho','error'); return; }
+    gmTagSave({add:v}).then(function(ok){
+        if(ok && inp) inp.value = '';
+        gmTagScanRefresh();
+    });
+}
+
+function gmTagRemove(tag){
+    if(!tag) return;
+    gmTagSave({remove:tag}).then(function(ok){ if(ok) gmTagScanRefresh(); });
+}
+
+/* 🔍 likhe hue title ki files me kaunsi custom quality mili — live count */
+function gmTagScan(){
+    var inp = document.getElementById('gmTagScanInput');
+    var q = (inp && inp.value || '').trim();
+    var box = document.getElementById('gmTagScan');
+    if(!box) return;
+    if(!q){ box.innerHTML = ''; return; }
+    if(!GMTAGS.length){ box.innerHTML = 'Pehle upar se ek quality name add karo.'; return; }
+    box.textContent = 'Check ho raha hai\u2026';
+    fetch('/api/group/tags/scan?q='+encodeURIComponent(q)).then(function(r){return r.json();}).then(function(d){
+        if(d.error){ box.innerHTML = gmEsc(d.error); return; }
+        var parts = [];
+        Object.keys(d.found||{}).forEach(function(t){ parts.push('<b>'+gmEsc(t)+'</b> &times;'+d.found[t]); });
+        box.innerHTML = parts.length
+            ? gmEsc(q)+' &rarr; '+parts.join(' &middot; ')+(d.untagged?' &middot; <b>'+d.untagged+'</b> bina tag':'')
+            : gmEsc(q)+' &rarr; in files me koi custom quality name nahi mila ('+(d.checked||0)+' files dekhi)';
+    }).catch(function(){ box.innerHTML = 'Check fail ho gaya.'; });
+}
+
+/* tag badalne par pehle kiya hua check dobara chalao */
+function gmTagScanRefresh(){
+    var inp = document.getElementById('gmTagScanInput');
+    if(inp && inp.value.trim()) gmTagScan();
+}
+
+document.addEventListener('DOMContentLoaded', gmTagLoad);
+</script>
+"""
 
 
 # 🧩 GROUPING BASIS selector — sirf admin ke dashboard me search row me inject hota hai.
@@ -91,15 +207,16 @@ GROUP_BASIS_HTML = """
         <div class="cdd-item selected" data-val="quality" onclick="pickBasis('quality','&#129513; Quality',this)">&#129513; Quality (same title, saari qualities)<span class="cdd-radio"><span class="cdd-radio-dot"></span></span></div>
         <div class="cdd-item" data-val="episode" onclick="pickBasis('episode','&#127902; Episode',this)">&#127902; Episode (har episode ka apna card)<span class="cdd-radio"><span class="cdd-radio-dot"></span></span></div>
         <div class="cdd-item" data-val="season" onclick="pickBasis('season','&#128250; Season',this)">&#128250; Season (ek season ke saare episodes)<span class="cdd-radio"><span class="cdd-radio-dot"></span></span></div>
+        <div class="cdd-item" data-val="source" onclick="pickBasis('source','&#127991; Source',this)">&#127991; Source (Sky / UnTuch / FreeMasx&hellip;)<span class="cdd-radio"><span class="cdd-radio-dot"></span></span></div>
     </div>
 </div>
 <script>
 (function(){
     var v = 'quality';
     try { v = localStorage.getItem('ff_dashboard_basis') || 'quality'; } catch(e) {}
-    if(['quality','episode','season'].indexOf(v) < 0) v = 'quality';
+    if(['quality','episode','season','source'].indexOf(v) < 0) v = 'quality';
     if(typeof gbasis !== 'undefined') gbasis = v;
-    var labels = {quality:'&#129513; Quality', episode:'&#127902; Episode', season:'&#128250; Season'};
+    var labels = {quality:'&#129513; Quality', episode:'&#127902; Episode', season:'&#128250; Season', source:'&#127991; Source'};
     var l = document.getElementById('cddBasisLabel');
     if(l) l.innerHTML = labels[v];
     document.querySelectorAll('#cddBasisMenu .cdd-item').forEach(function(i){

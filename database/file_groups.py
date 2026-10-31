@@ -18,6 +18,9 @@ Doc schema (collection: FileGroups):
 `verified` sirf admin ka bharosa hai: auto (bina verify) groups ko UI "unverified"
 dikhata hai. Group ID har group ke paas hota hai, lekin bharosemand sirf verified.
 
+Custom quality/source names (Sky, UnTuch, FreeMasx, Mydesi…) `GroupSettings`
+collection me ek doc `_id="release_tags"` ke andar `tags: [...]` ki tarah rehte hain.
+
 Ek file sirf EK manual group me rah sakti hai — `add` karte waqt baaki groups se
 $pull kar diya jaata hai (web/group_routes.py isi helper ko use karta hai).
 """
@@ -33,6 +36,11 @@ logger = logging.getLogger(__name__)
 
 file_groups = db["FileGroups"]
 
+# 🏷️ Admin ke apne quality/source names (Sky, UnTuch, FreeMasx, Mydesi…) —
+# alag chhoti collection me ek hi doc ("release_tags"), taaki groups saath na uljhein.
+group_settings = db["GroupSettings"]
+_TAGS_ID = "release_tags"
+
 # File collections hi (actors ka schema alag hai — wahan file_name/thumb_url nahi hote)
 _GROUP_COLS = {k: v for k, v in FILE_COLLECTIONS.items()}
 
@@ -47,6 +55,57 @@ async def ensure_group_indexes():
     except Exception as e:
         if "already exists" not in str(e) and "IndexKeySpecsConflict" not in str(e):
             logger.warning(f"Group index warning: {e}")
+
+
+async def get_tags():
+    """Admin ke custom quality/source names (list of str, original case)."""
+    try:
+        doc = await group_settings.find_one({"_id": _TAGS_ID}) or {}
+    except Exception as e:
+        logger.warning(f"Tags read failed: {e}")
+        return []
+    return clean_tags(doc.get("tags"))
+
+
+def clean_tags(tags):
+    """["Sky","UnTuch", ...] → trimmed, dedupe (case-insensitive), max 60 tags."""
+    out, seen = [], set()
+    for t in tags or []:
+        t = str(t or "").strip()
+        if not t or len(t) > 32:
+            continue
+        k = t.lower()
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append(t)
+        if len(out) >= 60:
+            break
+    return out
+
+
+async def set_tags(tags):
+    """Poori list replace (web UI se). Return: saaf ki hui list."""
+    clean = clean_tags(tags)
+    await group_settings.update_one(
+        {"_id": _TAGS_ID},
+        {"$set": {"tags": clean, "updated_on": time.time()}},
+        upsert=True,
+    )
+    return clean
+
+
+async def add_tag(tag):
+    tags = await get_tags()
+    if str(tag or "").strip().lower() in {t.lower() for t in tags}:
+        return tags
+    return await set_tags(tags + [tag])
+
+
+async def remove_tag(tag):
+    tags = await get_tags()
+    low = str(tag or "").strip().lower()
+    return await set_tags([t for t in tags if t.lower() != low])
 
 
 def _oid(gid):

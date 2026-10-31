@@ -24,10 +24,13 @@ from info import THUMBNAIL_STORAGE_CHANNEL
 from utils import temp, get_size, get_duration_str
 from database import file_groups as fg
 from database.ia_filterdb import FILE_COLLECTIONS, get_search_results, doc_resolution_text
-from web.grouping import group_key, group_title, shortcut_title, quality_label, suggest_score
+from web.grouping import (group_key, group_title, shortcut_title, quality_label, suggest_score,
+                          match_tag)
 from web.web_assets import build_page, get_auth, fast_json
-from web.group_ui import GROUP_UI_CSS, GROUP_MODAL_HTML, GROUP_MIGRATE_HTML, GROUP_UI_JS
-from web.search_api import get_user_role, TRENDING_CACHE, PREFETCH_CACHE
+from web.group_ui import (GROUP_UI_CSS, GROUP_MODAL_HTML, GROUP_MIGRATE_HTML, GROUP_UI_JS,
+                          GROUP_TAGS_HTML)
+from web.search_api import (get_user_role, TRENDING_CACHE, PREFETCH_CACHE,
+                            clear_release_tags_cache, get_release_tags)
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +48,7 @@ def _clear_search_caches():
     try:
         TRENDING_CACHE.clear()
         PREFETCH_CACHE.clear()
+        clear_release_tags_cache()
     except Exception:
         pass
 
@@ -65,7 +69,7 @@ def _group_thumb_url(g):
     return f"/api/group_thumb?gid={g['_id']}&v={v}"
 
 
-def _row_from_doc(doc):
+def _row_from_doc(doc, tags=None):
     fid = str(doc.get("_id"))
     col = str(doc.get("source_col") or "primary")
     name = str(doc.get("file_name") or "")
@@ -77,9 +81,19 @@ def _row_from_doc(doc):
         "size": get_size(doc.get("file_size", 0)),
         "duration": get_duration_str(doc.get("duration")),
         "res": res,
-        "ql": quality_label(res, name)[0],
+        "ql": quality_label(res, name, tags)[0],
+        "brand": match_tag(name, tags),
         "thumb": _thumb_url(fid, col, doc.get("thumb_url", "")),
     }
+
+
+async def _safe_tags():
+    """Custom quality names — DB down ho to grouping phir bhi chale (khali list)."""
+    try:
+        return await get_release_tags()
+    except Exception as e:
+        logger.debug(f"Tags load failed: {e}")
+        return []
 
 
 def _payload(g, rows):
@@ -99,9 +113,10 @@ def _payload(g, rows):
 async def _group_payload(g):
     members = fg.clean_members(g.get("members"))
     docs = await fg.fetch_member_docs(members)
+    tags = await _safe_tags()
     rows = []
     for d in docs:
-        r = _row_from_doc(d)
+        r = _row_from_doc(d, tags)
         r["group"] = str(g["_id"])
         rows.append(r)
     return _payload(g, rows)
@@ -136,7 +151,7 @@ async def _find_doc(fid, col=""):
     return None
 
 
-def _name_query_variants(name, max_variants=3):
+def _name_query_variants(name, max_variants=3, tags=None):
     """Naam se search ke liye 6→4→3→2 word wale queries (AND semantics ke liye).
 
     Strict `$text` search har word maangta hai, isliye "Alpha Movie 2025 Hindi
@@ -144,7 +159,7 @@ def _name_query_variants(name, max_variants=3):
     dhoondh paata. Chhote queries se recall badhta hai aur ranking Jaccard score
     se hoti hai, isliye sabse milti-julti files hi upar aati hain.
     """
-    words = [w for w in group_title(name).split() if w]
+    words = [w for w in group_title(name, tags=tags).split() if w]
     out = []
     for n in (6, 4, 3, 2):
         if len(words) < n:
@@ -157,10 +172,10 @@ def _name_query_variants(name, max_variants=3):
     return out
 
 
-async def _suggest_docs_for_name(name, limit=GROUP_SUGGEST_LIMIT):
+async def _suggest_docs_for_name(name, limit=GROUP_SUGGEST_LIMIT, tags=None):
     """Naam ke close files (same title ke variants) — Jaccard score se ranked."""
     seen, docs = {}, []
-    for q in _name_query_variants(name):
+    for q in _name_query_variants(name, tags=tags):
         if len(docs) >= limit:
             break
         try:
@@ -177,8 +192,109 @@ async def _suggest_docs_for_name(name, limit=GROUP_SUGGEST_LIMIT):
     return docs[:limit]
 
 
+async def _rekey_groups(tags=None):
+    """Tags badalne par manual groups ka auto-attach `key` dobara compute karo.
+
+    Warna naye tag ke saath aane wali same-title file purane group se attach nahi hoti.
+    Members list par koi asar nahi — sirf key update hoti hai.
+    """
+    groups = await fg.list_groups(limit=500)
+    if not groups:
+        return 0
+    fids = [m["fid"] for g in groups for m in fg.clean_members(g.get("members"))]
+    docs = await fg.docs_for_fids(fids)
+    changed = 0
+    for g in groups:
+        first = next((docs[m["fid"]] for m in fg.clean_members(g.get("members")) if m["fid"] in docs), None)
+        if first:
+            new_key = group_key(first.get("file_name", ""), tags=tags)
+        else:
+            new_key = group_key(g.get("title", ""), tags=tags)
+        if new_key and new_key != (g.get("key") or ""):
+            await fg.update_group(str(g["_id"]), key=new_key)
+            changed += 1
+    if changed:
+        logger.info(f"🔁 {changed} group key(s) re-computed after tag change")
+    return changed
+
+
 def _forbidden():
     return web.json_response({"error": "Core Admin Authorization Required!"}, status=403, dumps=fast_json)
+
+
+# ─────────────────────────────────────────────────────────
+# 🏷️ CUSTOM QUALITY / SOURCE NAMES  (Sky, UnTuch, FreeMasx, Mydesi…)
+# ─────────────────────────────────────────────────────────
+@group_routes.get("/api/group/tags")
+async def api_group_tags(req):
+    """Admin ke apne quality names + kaunsi quality kis file me mili (live preview)."""
+    role, _ = await get_user_role(req)
+    if role != "admin":
+        return _forbidden()
+    tags = await _safe_tags()
+    return web.json_response({"tags": tags, "total": len(tags)}, dumps=fast_json)
+
+
+@group_routes.post("/api/group/tags")
+async def api_group_tags_save(req):
+    """Add / remove / replace — {tags:[...]}  ya  {add:"Sky"}  ya  {remove:"Sky"}."""
+    role, _ = await get_user_role(req)
+    if role != "admin":
+        return _forbidden()
+
+    try:
+        data = await req.json()
+    except Exception:
+        return web.json_response({"error": "Invalid payload!"}, status=400, dumps=fast_json)
+
+    try:
+        if data.get("add") is not None:
+            tags = await fg.add_tag(data.get("add"))
+        elif data.get("remove") is not None:
+            tags = await fg.remove_tag(data.get("remove"))
+        elif isinstance(data.get("tags"), list):
+            tags = await fg.set_tags(data.get("tags"))
+        else:
+            return web.json_response({"error": "tags / add / remove chahiye!"}, status=400, dumps=fast_json)
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500, dumps=fast_json)
+
+    try:
+        await _rekey_groups(tags)
+    except Exception as e:
+        logger.warning(f"Group rekey failed: {e}")
+    _clear_search_caches()          # grouping badli → purane grouped pages stale
+    return web.json_response({"success": True, "tags": tags, "total": len(tags)}, dumps=fast_json)
+
+
+@group_routes.get("/api/group/tags/scan")
+async def api_group_tags_scan(req):
+    """Search box wale naam se dekho kaunsi custom quality kis file me mili (count ke saath)."""
+    role, _ = await get_user_role(req)
+    if role != "admin":
+        return _forbidden()
+
+    q = (req.query.get("q") or "").strip()
+    tags = await _safe_tags()
+    if not q:
+        return web.json_response({"tags": tags, "found": {}, "checked": 0}, dumps=fast_json)
+
+    try:
+        docs, _, _, _ = await get_search_results(q, 120, 0, collection_type="all", bypass_count=True)
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500, dumps=fast_json)
+
+    found, unknown = {}, 0
+    for d in docs:
+        name = str(d.get("file_name") or "")
+        tag = match_tag(name, tags)
+        if tag:
+            found[tag] = found.get(tag, 0) + 1
+        else:
+            unknown += 1
+    return web.json_response(
+        {"tags": tags, "found": found, "checked": len(docs), "untagged": unknown}, dumps=fast_json
+    )
 
 
 # ─────────────────────────────────────────────────────────
@@ -198,6 +314,7 @@ async def api_groups(req):
 
     all_fids = [m["fid"] for g in groups for m in fg.clean_members(g.get("members"))]
     docs = await fg.docs_for_fids(all_fids)
+    tags = await _safe_tags()
 
     out = []
     for g in groups:
@@ -206,7 +323,7 @@ async def api_groups(req):
             d = docs.get(m["fid"])
             if not d:
                 continue
-            r = _row_from_doc(d)
+            r = _row_from_doc(d, tags)
             r["group"] = str(g["_id"])
             rows.append(r)
         out.append(_payload(g, rows))
@@ -232,6 +349,7 @@ async def api_group_files(req):
     q = (req.query.get("q") or "").strip()
     typed_q = bool(q)          # user ne khud search box me type kiya (seed suggestions nahi)
 
+    tags = await _safe_tags()
     group = None
     seed_doc = None
     seed_row = None
@@ -249,11 +367,11 @@ async def api_group_files(req):
                 g = gm.get(str(fid))
                 if g:
                     group = await _group_payload(g)
-                seed_row = _row_from_doc(seed_doc)
+                seed_row = _row_from_doc(seed_doc, tags)
                 seed_row["group"] = group["gid"] if group else ""
                 seed_row["same_key"] = True
                 if not q:
-                    q = shortcut_title(seed_doc.get("file_name", ""))
+                    q = shortcut_title(seed_doc.get("file_name", ""), tags)
         elif not q:
             return web.json_response(
                 {"group": None, "files": [], "seed": None, "title": ""}, dumps=fast_json
@@ -265,7 +383,7 @@ async def api_group_files(req):
     if q:
         try:
             if seed_doc and not typed_q:
-                docs = await _suggest_docs_for_name(seed_doc.get("file_name", ""))
+                docs = await _suggest_docs_for_name(seed_doc.get("file_name", ""), tags=tags)
             else:
                 docs, _, _, _ = await get_search_results(
                     q, GROUP_FILES_LIMIT, 0, collection_type="all", bypass_count=True
@@ -274,7 +392,7 @@ async def api_group_files(req):
             logger.warning(f"Group file search failed: {e}")
             docs = []
 
-        rows = [_row_from_doc(d) for d in docs]
+        rows = [_row_from_doc(d, tags) for d in docs]
 
         # kis file ka group pehle se hai (dusre group me add karte waqt warning ke liye)
         try:
@@ -289,12 +407,12 @@ async def api_group_files(req):
         if seed_doc:
             base_name = seed_doc.get("file_name", "")
             seed_id = str(seed_doc["_id"])
-            seed_row = seed_row or _row_from_doc(seed_doc)
+            seed_row = seed_row or _row_from_doc(seed_doc, tags)
             if not any(r["fid"] == seed_id for r in rows):
                 rows.insert(0, seed_row)
-            base_key = group_key(base_name)
+            base_key = group_key(base_name, tags=tags)
             for r in rows:
-                r["same_key"] = bool(base_key) and base_key == group_key(r.get("name"))
+                r["same_key"] = bool(base_key) and base_key == group_key(r.get("name"), tags=tags)
             rows.sort(key=lambda r: -suggest_score(base_name, r.get("name")))
             seed_row = next((r for r in rows if r["fid"] == seed_id), seed_row)
 
@@ -304,7 +422,7 @@ async def api_group_files(req):
         "group": group,
         "files": files,
         "seed": seed_row,
-        "title": (group["title"] if group else (group_title(seed_doc.get("file_name", "")) if seed_doc else "")),
+        "title": (group["title"] if group else (group_title(seed_doc.get("file_name", ""), tags=tags) if seed_doc else "")),
     }, dumps=fast_json)
 
 
@@ -341,7 +459,8 @@ async def api_group_save(req):
         members = fixed
 
         first_name = next((docs[m["fid"]].get("file_name", "") for m in members if m["fid"] in docs), "")
-        key = group_key(first_name) if first_name else group_key(title)
+        tags = await _safe_tags()
+        key = group_key(first_name, tags=tags) if first_name else group_key(title, tags=tags)
 
         g = None
         if gid:
@@ -521,10 +640,13 @@ _GROUPS_PAGE_HTML = """
       member hatao ya group delete karo. Har group ka apna &#128279; ID hota hai &mdash; do group ek jaise hon to
       <b>Migrate</b> se ek ID doosre me daal do, dono ek group ban jayenge.
       <b>&#9989; Verified</b> wahi group maana jayega jise admin ne khud check karke tick kiya ho;
-      baaki groups auto-detect hue hain, unme galti ho sakti hai.</div>
+      baaki groups auto-detect hue hain, unme galti ho sakti hai.<br>
+      <b>&#127991; Meri Quality Names</b> (Sky / UnTuch / FreeMasx / Mydesi) yahan add karo &mdash;
+      in naam wali files ek hi title ke saath ek card me aayengi (jaise 1080p/720p).</div>
     </div>
     <button class="gm-new-btn" onclick="openGroupModal(null,null,null)">&#10133; New Group</button>
   </div>
+  <div id="gmTagsSlot"></div>
   <div class="gm-grid" id="groupGrid"></div>
 </div>
 """
@@ -561,7 +683,14 @@ async function gmPageReload(){
         grid.innerHTML='<div class="empty"><p>Groups load nahi hue. Refresh karo.</p></div>';
     }
 }
-document.addEventListener('DOMContentLoaded', gmPageReload);
+document.addEventListener('DOMContentLoaded', function(){
+    /* 🏷️ tags panel (GROUP_TAGS_HTML) ko page ke theek upar wale slot me daal do */
+    var slot = document.getElementById('gmTagsSlot');
+    var panel = document.querySelector('.gm-tagpanel');
+    if(slot && panel){ slot.appendChild(panel); }
+    gmPageReload();
+    if(typeof gmTagLoad === 'function') gmTagLoad();
+});
 </script>"""
 
 
@@ -574,5 +703,5 @@ async def groups_page(req):
         return web.HTTPFound('/dashboard')
 
     body = (GROUP_UI_CSS + _GROUPS_PAGE_HTML + GROUP_MODAL_HTML + GROUP_MIGRATE_HTML
-            + _GROUPS_PAGE_JS + GROUP_UI_JS)
+            + GROUP_TAGS_HTML + _GROUPS_PAGE_JS + GROUP_UI_JS)
     return build_page("Quality Groups - Fast Finder", body, "", "groups", role)

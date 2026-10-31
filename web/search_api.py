@@ -33,6 +33,31 @@ logger = logging.getLogger(__name__)
 
 search_routes = web.RouteTableDef()
 
+# 🏷️ Admin ke custom quality/source names (Sky / UnTuch / FreeMasx / Mydesi).
+# Har request par Mongo nahi chhedna — 60s ka chhota cache (badalne par
+# group_routes clear_release_tags_cache() se turant clear karta hai).
+TAGS_CACHE = {"tags": [], "expiry": 0}
+TAGS_CACHE_TTL = 60
+
+
+async def get_release_tags(force=False):
+    now = time.time()
+    if not force and TAGS_CACHE["expiry"] > now:
+        return TAGS_CACHE["tags"]
+    try:
+        tags = await fg.get_tags()
+    except Exception as e:
+        logger.debug(f"Release tags read failed: {e}")
+        tags = TAGS_CACHE["tags"] or []
+    TAGS_CACHE["tags"] = tags
+    TAGS_CACHE["expiry"] = now + TAGS_CACHE_TTL
+    return tags
+
+
+def clear_release_tags_cache():
+    TAGS_CACHE["tags"] = []
+    TAGS_CACHE["expiry"] = 0
+
 # ✅ BUG FIX: यह duplicate function हटाया गया।
 # ia_filterdb.py के get_search_results()/_search() पहले से ही raw query से
 # strict "word" "word" $text-query बना लेते हैं। यहाँ पहले से quote-wrapped
@@ -385,7 +410,7 @@ def _group_thumb_url(g):
     return f"/api/group_thumb?gid={g['_id']}&v={v}"
 
 
-async def _manual_groups_for(results, mode):
+async def _manual_groups_for(results, mode, tags=None):
     """Page ke results se jude manual groups resolve karo (members + auto-key dono se).
 
     Har group ke saare saved members ke result dicts bhi laaye jaate hain (chahe wo
@@ -394,7 +419,7 @@ async def _manual_groups_for(results, mode):
     if not results:
         return {}
     fids = [r.get("file_id") for r in results if r.get("file_id")]
-    keys = list({k for k in (group_key(r.get("name")) for r in results) if k})
+    keys = list({k for k in (group_key(r.get("name"), tags=tags) for r in results) if k})
     try:
         docs = await fg.groups_for_page(fids=fids, keys=keys)
     except Exception as e:
@@ -420,10 +445,11 @@ async def _manual_groups_for(results, mode):
     return out
 
 
-async def _grouped_page(q, col, mode, offset, target, recent=False, basis="quality"):
+async def _grouped_page(q, col, mode, offset, target, recent=False, basis="quality", tags=None):
     """Grouped search ka ek page — `target` jitne CARD (single + group) lautata hai.
 
-    `basis` = grouping ka aadhar: quality (default) / episode / season.
+    `basis` = grouping ka aadhar: quality (default) / episode / season / source.
+    `tags`  = admin ke custom quality names (Sky, UnTuch, FreeMasx, Mydesi…).
     Return: (cards, next_offset) — next_offset raw-doc offset hai (dashboard ise
     `offset` ki tarah wapas bhejta hai), '' matlab aur pages nahi hain.
     """
@@ -443,7 +469,7 @@ async def _grouped_page(q, col, mode, offset, target, recent=False, basis="quali
             next_raw = ""
 
         results = _build_results_list(raw_docs, mode)
-        cards = build_groups(results, await _manual_groups_for(results, mode), basis)
+        cards = build_groups(results, await _manual_groups_for(results, mode, tags), basis, tags)
 
         if len(cards) > target or not next_raw or len(raw_docs) >= GROUP_MAX_RAW:
             break
@@ -475,6 +501,10 @@ async def api_search(req):
     basis = (req.query.get("gbasis") or "quality").lower()
     if role != "admin" or basis not in GROUP_BASES:
         basis = "quality"
+    # 🏷️ admin ke custom quality names (grouping me resolution jaise treat hote hain).
+    # Sirf grouped mode me chahiye; admin ho ya user — dono ko same grouping dikhe,
+    # warna manual group ka `key` match nahi karega.
+    tags = await get_release_tags() if want_group else []
 
     if col != "all" and col not in COLLECTIONS:
         col = "all"
@@ -491,7 +521,8 @@ async def api_search(req):
     # सबसे नई अपलोड की गई फाइलें (Recently Added) दिखाओ
     if not q:
         if want_group:
-            cards, next_offset = await _grouped_page("", col, mode, off, lim, recent=True, basis=basis)
+            cards, next_offset = await _grouped_page("", col, mode, off, lim, recent=True,
+                                                    basis=basis, tags=tags)
             return web.json_response({
                 "results": cards,
                 "total": off + len(cards) + (1 if next_offset else 0),
@@ -513,7 +544,7 @@ async def api_search(req):
     # ── GROUPED MODE (dashboard) ──────────────────────────────
     # Har page par 21 CARD aate hain (na ki 21 files jo 5-6 group me simat jaayein).
     if want_group:
-        trend_key = f"G|{col}|{mode}|{basis}|{q.lower()}"
+        trend_key = f"G|{col}|{mode}|{basis}|{','.join(tags)}|{q.lower()}"
         if off == 0:
             cached = TRENDING_CACHE.get(trend_key)
             if cached and cached.get("expiry", 0) > time.time():
@@ -525,7 +556,7 @@ async def api_search(req):
                     "basis": basis,
                 }, dumps=fast_json)
 
-        cards, next_offset = await _grouped_page(q, col, mode, off, lim, basis=basis)
+        cards, next_offset = await _grouped_page(q, col, mode, off, lim, basis=basis, tags=tags)
 
         if off == 0 and cards:
             TRENDING_CACHE[trend_key] = {

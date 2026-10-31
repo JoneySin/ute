@@ -19,6 +19,11 @@ Grouping ka AADHAR (basis) admin chun sakta hai:
   • quality — same title, saari qualities ek card (default / purana behaviour).
   • episode — same episode ki qualities ek card (Show S01E01 → 480p+720p+1080p).
   • season  — ek season ke saare episodes ek card (Show S01 → E01…E10).
+  • source  — admin ke apne quality names (Sky / UnTuch / FreeMasx / Mydesi) alag-alag.
+
+Admin ke custom names (`tags`) hamesha resolution jaisa treat hote hain:
+naam se hata diye jaate hain (isliye "Movie Sky 1080p" aur "Movie UnTuch 720p" ek hi
+group me aate hain) aur label me dikhaye jaate hain ("Sky 1080p" / "UnTuch 720p").
 """
 
 import html as _html
@@ -43,7 +48,51 @@ _EP_ONLY_RE = re.compile(r"(?<![A-Za-z0-9])e(?:p|pisode)?\s*\.?\s*0*(\d{1,3})(?!
 _SE_ONLY_RE = re.compile(
     r"(?<![A-Za-z0-9])(?:s(?:eason)?)\s*\.?\s*0*(\d{1,2})(?![A-Za-z0-9])", re.I)
 
-GROUP_BASES = ("quality", "episode", "season")
+GROUP_BASES = ("quality", "episode", "season", "source")
+
+def _tag_res(tags):
+    """Admin ke tags → compiled matcher (ek hi regex me, case-insensitive)."""
+    parts = []
+    for t in tags or []:
+        t = str(t or "").strip()
+        if not t:
+            continue
+        parts.append(re.escape(t).replace(r"\ ", r"[\s._\-]*"))
+    if not parts:
+        return None
+    return re.compile(r"(?<![A-Za-z0-9])(?:" + "|".join(parts) + r")(?![A-Za-z0-9])", re.I)
+
+
+def match_tag(text, tags):
+    """Naam me se pehla matching custom source/quality name (original case me), warna ''."""
+    rx = _tag_res(tags)
+    if rx is None:
+        return ""
+    m = rx.search(str(text or ""))
+    if not m:
+        return ""
+    found = m.group(0).lower()
+    for t in tags or []:
+        if str(t or "").strip().lower() == found:
+            return str(t).strip()
+    return m.group(0)
+
+
+def strip_tags(text, tags):
+    """Naam me se admin ke custom names hata do (jagah space), taaki key same rahe."""
+    rx = _tag_res(tags)
+    if rx is None:
+        return str(text or "")
+    return rx.sub(" ", str(text or ""))
+
+
+def _brand_label(tag, res_label):
+    """(tag, '1080p') → 'Sky 1080p' | 'Sky' | '1080p'."""
+    tag = str(tag or "").strip()
+    res_label = str(res_label or "").strip()
+    if tag and res_label:
+        return f"{tag} {res_label}"
+    return tag or res_label
 
 
 def _clean_basis(basis):
@@ -84,7 +133,7 @@ def _strip_spans(text, spans):
     return text
 
 
-def group_key(name, basis="quality"):
+def group_key(name, basis="quality", tags=None):
     """Quality/extension hata kar normalized key. Khali ho to '' (matlab group mat karo).
 
     basis:
@@ -92,10 +141,18 @@ def group_key(name, basis="quality"):
       • "episode" — Same episode (S01E02 / 1x02 / Episode 2) ek hi key me.
       • "season"  — Episode marker hata kar season (S01) ek key me; season na ho
                     to saare episodes ek hi key me (poora show).
+      • "source"  — Admin ke custom names (Sky/UnTuch/FreeMasx/Mydesi) alag-alag.
+
+    `tags` = admin ke custom quality names; wo naam se hata diye jaate hain taaki
+    "Movie Sky 1080p" aur "Movie UnTuch 720p" ek hi group me aayein.
     """
     basis = _clean_basis(basis)
     s = _EXT_TAIL_RE.sub("", str(name or ""))
     s = _RES_TOKEN_RE.sub(" ", s)
+    s = strip_tags(s, tags)
+    if basis == "source":                       # title + brand
+        brand = match_tag(name, tags)
+        return _SEP_RE.sub(" ", s.lower()).strip() + (f" | {brand.lower()}" if brand else "")
     if basis != "quality":
         season, episode, spans = parse_episode(s)
         if basis == "episode":
@@ -112,17 +169,20 @@ def group_key(name, basis="quality"):
     return _SEP_RE.sub(" ", s.lower()).strip()
 
 
-def group_title(name, basis="quality"):
+def group_title(name, basis="quality", tags=None):
     """Dikhane layak saaf title (original case me), quality + extension hata kar.
 
     basis ke hisaab se episode/season marker canonical form me rakha jaata hai:
       • quality → jaise likha hai waise hi ("Show S01E02")
       • episode → "Show S01E02"
       • season  → "Show S01"
+      • source  → "Show S01E02 · Sky" (admin ke custom quality name ke saath)
     """
     basis = _clean_basis(basis)
+    brand = match_tag(name, tags)
     s = _EXT_TAIL_RE.sub("", str(name or ""))
     s = _RES_TOKEN_RE.sub(" ", s)
+    s = strip_tags(s, tags)
     if basis != "quality":
         season, episode, spans = parse_episode(s)
         if spans and (episode or season):
@@ -139,17 +199,23 @@ def group_title(name, basis="quality"):
     s = re.sub(r"([|\-–_.])(\s*\1)+", r"\1", s)          # '| |' / '..' jaise doble separator
     s = re.sub(r"\s+", " ", s)
     s = re.sub(r"^[\s|\-–_.]+|[\s|\-–_.]+$", "", s)
+    if basis == "source" and brand:
+        s = f"{s} · {brand}" if s else brand
     return s
 
 
-def shortcut_title(name):
+def shortcut_title(name, tags=None):
     """Search-suggestion ke liye chhota title (pehle 6 meaningful words)."""
-    words = [w for w in group_title(name).split() if w]
+    words = [w for w in group_title(name, tags=tags).split() if w]
     return " ".join(words[:6])
 
 
-def quality_label(res_text, name=""):
-    """(label, sort_height). res "1920×1080" se; na ho to naam ke token se; warna ('', 0)."""
+def quality_label(res_text, name="", tags=None):
+    """(label, sort_height). res "1920×1080" se; na ho to naam ke token se; warna ('', 0).
+
+    Admin ka custom quality name mila to label me pehle wo aata hai:
+    "Sky 1080p", "UnTuch 720p", sirf "Sky" (resolution na ho to).
+    """
     m = re.search(r"(\d{3,5})\D+(\d{3,5})", str(res_text or ""))
     eh = 0
     if m:
@@ -160,13 +226,14 @@ def quality_label(res_text, name=""):
         if t:
             tok = t.group(0).lower().replace(" ", "")
             eh = {"4k": 2160, "8k": 4320, "uhd": 2160}.get(tok) or int(re.sub(r"\D", "", tok) or 0)
+    brand = match_tag(name or res_text, tags)
     if not eh:
-        return "", 0
+        return brand, 0
     for lim, lab in ((4000, "8K"), (2000, "2160p"), (1300, "1440p"), (1000, "1080p"),
                      (650, "720p"), (450, "480p"), (330, "360p"), (220, "240p")):
         if eh >= lim:
-            return lab, eh
-    return f"{eh}p", eh
+            return _brand_label(brand, lab), eh
+    return _brand_label(brand, f"{eh}p"), eh
 
 
 def _card_key(text):
@@ -179,6 +246,16 @@ def _copy(d, **extra):
     out = dict(d)
     out.update(extra)
     return out
+
+
+def _brand_list(variants):
+    """Card par dikhane layak custom quality names (admin ke tags)."""
+    out = []
+    for d in variants or []:
+        b = str(d.get("brand") or "").strip()
+        if b and b not in out:
+            out.append(b)
+    return out[:4]
 
 
 def _episode_count(variants):
@@ -209,11 +286,13 @@ def _chips_and_labels(variants):
 # ─────────────────────────────────────────────────────────
 # 🧩 CORE: results → cards
 # ─────────────────────────────────────────────────────────
-def build_groups(results, manual=None, basis="quality"):
+def build_groups(results, manual=None, basis="quality", tags=None):
     """Results list ko group cards me badalta hai.
 
     results : web result dicts (ranking order me, `file_id` ke saath)
-    basis   : "quality" | "episode" | "season" — grouping ka aadhar
+    basis   : "quality" | "episode" | "season" | "source" — grouping ka aadhar
+    tags    : admin ke custom quality names ["Sky","UnTuch","FreeMasx","Mydesi"]
+              (naam se hata kar label me dikhaye jaate hain)
     manual  : {gid: {"gid", "title", "key", "thumb", "verified", "members": [fid...],
                      "variants": [result dict...]}}
               (manual group ke saare saved members ke result dicts — chahe wo is
@@ -248,7 +327,7 @@ def build_groups(results, manual=None, basis="quality"):
         fid = r.get("file_id")
         gid = fid_to_gid.get(fid)
         if not gid:
-            k = group_key(r.get("name"), basis)
+            k = group_key(r.get("name"), basis, tags)
             gid = key_to_gid.get(k) if k else None
         if gid:
             if gid not in manual_seen:
@@ -257,7 +336,7 @@ def build_groups(results, manual=None, basis="quality"):
             manual_seen[gid].append((idx, r))
             continue
 
-        k = group_key(r.get("name"), basis)
+        k = group_key(r.get("name"), basis, tags)
         if not k:
             order.append(("single", idx))
             continue
@@ -269,7 +348,7 @@ def build_groups(results, manual=None, basis="quality"):
     out = []
     for kind, v in order:
         if kind == "single":
-            out.append(_copy(results[v], _first=v))
+            out.append(_copy(results[v], _first=v, brand=match_tag(results[v].get("name"), tags)))
             continue
 
         if kind == "manual":
@@ -295,14 +374,15 @@ def build_groups(results, manual=None, basis="quality"):
 
             labelled = []
             for it in variants:
-                lab, eh = quality_label(it.get("res"), it.get("name"))
-                labelled.append((eh, _copy(it, ql=lab)))
+                lab, eh = quality_label(it.get("res"), it.get("name"), tags)
+                labelled.append((eh, _copy(it, ql=lab, brand=match_tag(it.get("name"), tags))))
             labelled.sort(key=lambda x: x[0])        # stable: barabar quality me original order
             vlist = [d for _, d in labelled]
 
             master = page_rows[0] if page_rows else variants[0]
             chips, labels = _chips_and_labels(vlist)
-            title = str(g.get("title") or "").strip() or group_title(master.get("name"), basis) \
+            brands = _brand_list(vlist)
+            title = str(g.get("title") or "").strip() or group_title(master.get("name"), basis, tags) \
                 or str(master.get("name") or "")
             thumb = str(g.get("thumb") or "").strip() or master.get("tg_thumb") or ""
             out.append({
@@ -320,6 +400,8 @@ def build_groups(results, manual=None, basis="quality"):
                 "tg_thumb": thumb,
                 "chips": chips,
                 "labels": labels[:4],
+            "brands": brands,
+                "brands": brands,
                 "variants": vlist,
                 "_first": page_items[0][0] if page_items else 0,
             })
@@ -329,17 +411,18 @@ def build_groups(results, manual=None, basis="quality"):
         items = auto_buckets.get(v) or []
         if len(items) == 1:
             idx, only = items[0]
-            out.append(_copy(only, _first=idx))
+            out.append(_copy(only, _first=idx, brand=match_tag(only.get("name"), tags)))
             continue
         labelled = []
         for _, it in items:
-            lab, eh = quality_label(it.get("res"), it.get("name"))
-            labelled.append((eh, _copy(it, ql=lab)))
+            lab, eh = quality_label(it.get("res"), it.get("name"), tags)
+            labelled.append((eh, _copy(it, ql=lab, brand=match_tag(it.get("name"), tags))))
         labelled.sort(key=lambda x: x[0])
         vlist = [d for _, d in labelled]
         chips, labels = _chips_and_labels(vlist)
+        brands = _brand_list(vlist)
         master = items[0][1]
-        title = group_title(master.get("name"), basis) or str(master.get("name") or "")
+        title = group_title(master.get("name"), basis, tags) or str(master.get("name") or "")
         # master thumbnail = ranking me pehli (best match) file ka poster, warna koi bhi
         thumb = master.get("tg_thumb") or next((d.get("tg_thumb") for d in vlist if d.get("tg_thumb")), "")
         out.append({
@@ -357,6 +440,7 @@ def build_groups(results, manual=None, basis="quality"):
             "tg_thumb": thumb,
             "chips": chips,
             "labels": labels[:4],
+            "brands": brands,
             "variants": vlist,
             "_first": items[0][0],
         })

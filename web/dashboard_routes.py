@@ -73,7 +73,13 @@ CARD_CSS = """
 .grp-card:hover,.grp-card.open{border-color:var(--accent)}
 .grp-card.open{grid-column:1/-1;box-shadow:0 8px 28px rgba(0,0,0,.45)}
 .grp-head{display:flex;align-items:center;gap:12px;padding:12px 14px;cursor:pointer;-webkit-tap-highlight-color:transparent}
-.grp-poster{width:54px;height:76px;object-fit:cover;border-radius:6px;flex-shrink:0;background:var(--bg3)}
+.grp-poster{width:54px;height:76px;object-fit:cover;border-radius:6px;flex-shrink:0;background:var(--bg3);display:block}
+/* ग्रुप का मास्टर थंबनेल — अंदर क्वालिटी-काउंट बैज */
+.grp-poster-wrap{position:relative;display:inline-block}
+.grp-badge{position:absolute;right:2px;bottom:2px;background:rgba(229,9,20,.92);color:#fff;border-radius:4px;padding:1px 6px;font-size:8.5px;font-weight:900;border:1px solid rgba(255,255,255,.4);letter-spacing:.3px;display:inline-flex;align-items:center;gap:3px;line-height:1}
+/* ग्रुप में जोड़ें (एडमिन) */
+.btn-grp{flex:1;padding:6px 0;border-radius:6px;font-size:10px;font-weight:700;cursor:pointer;transition:background .12s,transform .1s;border:none;background:rgba(60,60,68,.92);backdrop-filter:blur(10px);color:#ffd166;border:1px solid rgba(255,209,102,.35)}
+.btn-grp:hover{background:rgba(95,95,102,.95)}
 .grp-main{flex:1;min-width:0}
 .grp-top{display:flex;align-items:center;gap:8px;margin-bottom:6px}
 .grp-type{background:var(--bg3);color:var(--muted);font-size:9px;font-weight:800;letter-spacing:.6px;padding:3px 7px;border-radius:5px;border:1px solid var(--border)}
@@ -178,6 +184,7 @@ function cardHtml(f,nested){
                 adminBtns='<div class="poster-admin">'+
                     '<button class="btn-edit" onclick="event.stopPropagation();editFile(\\''+f.file_id+'\\',\\''+f.raw_collection+'\\',\\''+encName+'\\', \\''+encCap+'\\')">&#9999; Edit</button>'+
                     '<button class="btn-del" onclick="event.stopPropagation();deleteFile(\\''+f.file_id+'\\',\\''+f.raw_collection+'\\')">&#128465; Delete</button>'+
+                    '<button class="btn-grp" onclick="event.stopPropagation();addToGroup(\\''+f.file_id+'\\',\\''+f.raw_collection+'\\')">&#10010; ग्रुप</button>'+
                 '</div>';
             }
 
@@ -217,6 +224,7 @@ function cardHtml(f,nested){
                     textInfo+='<div class="text-admin-row">'+
                         '<button class="btn-edit" onclick="event.stopPropagation();editFile(\\''+f.file_id+'\\',\\''+f.raw_collection+'\\',\\''+encName+'\\', \\''+encCap+'\\')">&#9999; Edit</button>'+
                         '<button class="btn-del" onclick="event.stopPropagation();deleteFile(\\''+f.file_id+'\\',\\''+f.raw_collection+'\\')">&#128465; Delete</button>'+
+                        '<button class="btn-grp" onclick="event.stopPropagation();addToGroup(\\''+f.file_id+'\\',\\''+f.raw_collection+'\\')">&#10010; ग्रुप</button>'+
                     '</div>';
                 }
             }
@@ -240,7 +248,8 @@ function groupHtml(g){
     });
     var poster='';
     if(pMode!=='none' && g.tg_thumb){
-        poster='<img class="grp-poster" src="'+g.tg_thumb+'" loading="lazy" decoding="async" onerror="this.style.display=\\'none\\'">';
+        var badgeTxt = (g.count && g.count > 1) ? (g.count + ' क्वालिटी') : '1 क्वालिटी';
+        poster='<div class="grp-poster-wrap"><img class="grp-poster" src="'+g.tg_thumb+'" loading="lazy" decoding="async" onerror="this.style.display=\\'none\\'"><span class="grp-badge">'+badgeTxt+'</span></div>';
     }
     var inner='';
     g.variants.forEach(function(v){inner+=cardHtml(v,true);});
@@ -264,6 +273,18 @@ function toggleGroup(el){
     var k=el.getAttribute('data-gk');
     var isOpen=el.classList.toggle('open');
     if(isOpen){openGroups[k]=1;}else{delete openGroups[k];}
+}
+
+async function addToGroup(fid, col){
+    var target = prompt('जिस फाइल का ग्रुप इसमें जोड़ना है, उसका FILE_ID लिखें (Target File ID):');
+    if(!target || !target.trim()) return;
+    target = target.trim();
+    try{
+        var r = await fetch('/api/group_add', {method:'POST', body:JSON.stringify({file_id:fid, collection:col, target_file_id:target}), headers:{'Content-Type':'application/json'}});
+        var res = await r.json();
+        if(res.success){ showToast('✅ ग्रुप में जोड़ दिया गया!'); refreshGridAfterEdit(); }
+        else { showToast(res.error||'ग्रुप में नहीं जोड़ा जा सका!','error'); }
+    }catch(e){ showToast('नेटवर्क एरर!','error'); }
 }
 
 async function doSearch(o,allowEmpty){

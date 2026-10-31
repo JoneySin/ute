@@ -338,6 +338,7 @@ def _build_results_list(all_m, mode):
         results_list.append({
             "file_id": db_id,
             "name": d.get("file_name", "Unknown File"),
+            "group_key": d.get("group_key", ""),   # ✅ admin-set override: जब सेट हो तो ग्रुपिंग यही key इस्तेमाल करती है
             "size": get_size(d.get("file_size", 0)),
             # ✅ NEW: video duration (e.g. "1:02:03"). Purani/unindexed files me duration
             # 0 hota hai, tab khali string jaati hai aur UI me chip ban hi nahi.
@@ -377,6 +378,15 @@ def _group_key(name):
     s = _EXT_TAIL_RE.sub("", str(name or ""))
     s = _RES_TOKEN_RE.sub(" ", s).lower()
     return _SEP_RE.sub(" ", s).strip()
+
+
+def _group_key_for(r):
+    """ग्रुपिंग की key: admin द्वारा सेट किया 'group_key' override मान्य हो तो वही,
+    वरना फाइल नाम से नॉर्मलाइज़्ड key।"""
+    gk = r.get("group_key")
+    if gk:
+        return gk
+    return _group_key(r.get("name"))
 
 
 def _group_title(name):
@@ -421,7 +431,7 @@ def group_results(results):
     """
     order, buckets = [], {}
     for r in results:
-        k = _group_key(r.get("name"))
+        k = _group_key_for(r)
         if not k:                                   # naam me kuch bacha hi nahi → akela
             order.append(("single", r))
             continue
@@ -692,6 +702,45 @@ async def api_edit_name(req):
         return web.json_response({"success": True}, dumps=fast_json)
     except Exception as e:
         logger.error(f"Edit/Transfer Error: {e}")
+        return web.json_response({"error": str(e)}, status=500, dumps=fast_json)
+
+
+# ─────────────────────────────────────────────────────────
+# 🗂️ ADMIN: फाइल को किसी मौजूदा ग्रुप में जोड़ें (नाम थोड़ा अलग होने पर)
+# ─────────────────────────────────────────────────────────
+@search_routes.post("/api/group_add")
+async def api_group_add(req):
+    role, _ = await get_user_role(req)
+    if role != "admin":
+        return web.json_response({"error": "Core Admin Authorization Required!"}, status=403, dumps=fast_json)
+    try:
+        data = await req.json()
+        fid = data.get("file_id")
+        col = data.get("collection", "primary").lower()
+        target_fid = data.get("target_file_id")
+        if col not in COLLECTIONS or not fid or not target_fid:
+            return web.json_response({"error": "Missing structural inputs!"}, status=400, dumps=fast_json)
+
+        col_obj = COLLECTIONS[col]
+        src = await col_obj.find_one({"_id": fid})
+        tgt = await col_obj.find_one({"_id": target_fid})
+        if not src or not tgt:
+            return web.json_response({"error": "File not found in database!"}, status=404, dumps=fast_json)
+
+        # टारगेट फाइल का ग्रुप-key: स्टोर किया override हो तो वही, वरना नाम से नॉर्मलाइज़्ड key
+        target_key = tgt.get("group_key") or _group_key(tgt.get("file_name", ""))
+        if not target_key:
+            return web.json_response({"error": "Target file को ग्रुप में नहीं जोड़ा जा सकता (कोई उपयोगी शीर्षक नहीं)!"}, status=400, dumps=fast_json)
+
+        await col_obj.update_one({"_id": fid}, {"$set": {"group_key": target_key}})
+
+        PREFETCH_CACHE.clear()
+        TRENDING_CACHE.clear()
+        thumb_cache.clear()
+
+        return web.json_response({"success": True}, dumps=fast_json)
+    except Exception as e:
+        logger.error(f"Group add error: {e}")
         return web.json_response({"error": str(e)}, status=500, dumps=fast_json)
 
 

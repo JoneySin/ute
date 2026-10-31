@@ -80,6 +80,20 @@ CARD_CSS = """
 /* ग्रुप में जोड़ें (एडमिन) */
 .btn-grp{flex:1;padding:6px 0;border-radius:6px;font-size:10px;font-weight:700;cursor:pointer;transition:background .12s,transform .1s;border:none;background:rgba(60,60,68,.92);backdrop-filter:blur(10px);color:#ffd166;border:1px solid rgba(255,209,102,.35)}
 .btn-grp:hover{background:rgba(95,95,102,.95)}
+/* ग्रुप का मास्टर थंबनेल — फुल पोस्टर-बॉक्स (बिना ग्रुप वाले फाइल जैसा 16:9) */
+.grp-poster-box{position:relative;padding-top:56.25%;background:linear-gradient(90deg,var(--bg3) 0,#2a2a38 50%,var(--bg3) 100%);background-size:200% 100%;animation:shimmer 1.5s infinite linear;overflow:hidden;border-radius:6px;border:1px solid var(--border)}
+.grp-poster-img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;opacity:0;transition:opacity .3s}
+.grp-poster-img.loaded{opacity:1}
+/* क्वालिटी चिप्स अंदर थंबनेल में (नीचे बाएं) */
+.grp-poster-chips{position:absolute;left:0;right:0;bottom:7px;display:flex;gap:5px;padding:0 8px;overflow-x:auto;z-index:3}
+.grp-poster-chip{background:rgba(0,0,0,.78);backdrop-filter:blur(6px);color:#fbbf24;border:1px solid var(--border);border-radius:5px;padding:2px 7px;font-size:9px;font-weight:800;white-space:nowrap;flex-shrink:0}
+/* काउंट बैज दाएं नीचे अंदर थंबनेल */
+.grp-poster-count{position:absolute;right:7px;bottom:7px;background:rgba(229,9,20,.92);color:#fff;border-radius:4px;padding:1px 6px;font-size:8.5px;font-weight:900;border:1px solid rgba(255,255,255,.4);letter-spacing:.3px;z-index:4}
+/* फाइल आईडी एडमिन कार्ड में */
+.fc-file-id{font-size:9px;color:var(--muted);margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* फाइल आईडी कॉपी बटन */
+.btn-copy{flex:1;padding:6px 0;border-radius:6px;font-size:10px;font-weight:700;cursor:pointer;transition:background .12s,transform .1s;border:none;background:rgba(60,60,68,.92);backdrop-filter:blur(10px);color:#93c5fd;border:1px solid rgba(147,197,253,.35)}
+.btn-copy:hover{background:rgba(95,95,102,.95)}
 .grp-main{flex:1;min-width:0}
 .grp-top{display:flex;align-items:center;gap:8px;margin-bottom:6px}
 .grp-type{background:var(--bg3);color:var(--muted);font-size:9px;font-weight:800;letter-spacing:.6px;padding:3px 7px;border-radius:5px;border:1px solid var(--border)}
@@ -185,6 +199,7 @@ function cardHtml(f,nested){
                     '<button class="btn-edit" onclick="event.stopPropagation();editFile(\\''+f.file_id+'\\',\\''+f.raw_collection+'\\',\\''+encName+'\\', \\''+encCap+'\\')">&#9999; Edit</button>'+
                     '<button class="btn-del" onclick="event.stopPropagation();deleteFile(\\''+f.file_id+'\\',\\''+f.raw_collection+'\\')">&#128465; Delete</button>'+
                     '<button class="btn-grp" onclick="event.stopPropagation();addToGroup(\\''+f.file_id+'\\',\\''+f.raw_collection+'\\')">&#10010; ग्रुप</button>'+
+                    '<button class="btn-copy" onclick="event.stopPropagation();copyFileId('+f.file_id+')">📋 ID</button>'+
                 '</div>';
             }
 
@@ -225,6 +240,7 @@ function cardHtml(f,nested){
                         '<button class="btn-edit" onclick="event.stopPropagation();editFile(\\''+f.file_id+'\\',\\''+f.raw_collection+'\\',\\''+encName+'\\', \\''+encCap+'\\')">&#9999; Edit</button>'+
                         '<button class="btn-del" onclick="event.stopPropagation();deleteFile(\\''+f.file_id+'\\',\\''+f.raw_collection+'\\')">&#128465; Delete</button>'+
                         '<button class="btn-grp" onclick="event.stopPropagation();addToGroup(\\''+f.file_id+'\\',\\''+f.raw_collection+'\\')">&#10010; ग्रुप</button>'+
+                    '<button class="btn-copy" onclick="event.stopPropagation();copyFileId('+f.file_id+')">📋 ID</button>'+
                     '</div>';
                 }
             }
@@ -234,6 +250,7 @@ function cardHtml(f,nested){
                 textInfo+
                 '<div class="fc-body">'+
                     '<div class="fc-name" id="name-title-'+f.file_id+'" onclick="window.open(\\''+f.watch+'\\',\\'_blank\\')">'+f.name+'</div>'+
+                    (isAdminView?'<div class="fc-file-id">ID: '+f.file_id+'</div>':'')+
                 '</div>'+
             '</div>';
 }
@@ -248,8 +265,16 @@ function groupHtml(g){
     });
     var poster='';
     if(pMode!=='none' && g.tg_thumb){
-        var badgeTxt = (g.count && g.count > 1) ? (g.count + ' क्वालिटी') : '1 क्वालिटी';
-        poster='<div class="grp-poster-wrap"><img class="grp-poster" src="'+g.tg_thumb+'" loading="lazy" decoding="async" onerror="this.style.display=\\'none\\'"><span class="grp-badge">'+badgeTxt+'</span></div>';
+        var chipsHtml='';
+        (g.chips||[]).forEach(function(c){
+            chipsHtml+='<span class="grp-poster-chip">'+c.label+(c.count>1?' ×'+c.count:'')+'</span>';
+        });
+        var countTxt = (g.count && g.count > 1) ? (g.count + ' क्वालिटी') : '1 क्वालिटी';
+        poster='<div class="grp-poster-box">'+
+            '<img class="grp-poster-img" src="'+g.tg_thumb+'" loading="lazy" decoding="async" onerror="this.style.display=\'none\'" onload="this.classList.add('loaded')">'+
+            chipsHtml+
+            '<span class="grp-poster-count">'+countTxt+'</span>'+
+        '</div>';
     }
     var inner='';
     g.variants.forEach(function(v){inner+=cardHtml(v,true);});
@@ -275,8 +300,16 @@ function toggleGroup(el){
     if(isOpen){openGroups[k]=1;}else{delete openGroups[k];}
 }
 
+function copyFileId(fid){
+    navigator.clipboard.writeText(fid).then(function(){
+        showToast('✅ File ID कॉपी हो गया: '+fid);
+    },function(){
+        showToast('कॉपी नहीं हुआ','error');
+    });
+}
+
 async function addToGroup(fid, col){
-    var target = prompt('जिस फाइल का ग्रुप इसमें जोड़ना है, उसका FILE_ID लिखें (Target File ID):');
+    var target = prompt('जिस फाइल का ग्रुप इसमें जोड़ना है, उसका FILE_ID लिखें।\n(कार्ड पर दिख रहे "ID: ..." से कॉपी करें या नीचे दिए गए विकल्प देखें)\nTarget File ID:');
     if(!target || !target.trim()) return;
     target = target.trim();
     try{

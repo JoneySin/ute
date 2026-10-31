@@ -494,32 +494,45 @@ async def api_search(req):
         off = 0
 
     lim = MAX_WEB_RESULTS
+    # ग्रुपिंग वरिएंट्स को collapse करके एक कार्ड बनाती है, इसलिए 21 डिस्प्ले
+    # कार्ड दिखाने के लिए कच्चे रिजल्ट्स ज्यादा फेच करने पड़ते हैं (worst case:
+    # हर 4 वरिएंट्स → 1 ग्रुप कार्ड)। बिना ग्रुपिंग के lim ही काफी है।
+    fetch_lim = lim * 4 if want_group else lim
 
     # 🆕 कोई query नहीं दी गई — dashboard पर खाली स्क्रीन दिखाने की बजाय
     # सबसे नई अपलोड की गई फाइलें (Recently Added) दिखाओ
     if not q:
-        recent_docs, recent_next_offset = await get_recent_files(lim, offset=off, collection_type=col)
+        recent_docs, recent_next_offset = await get_recent_files(fetch_lim, offset=off, collection_type=col)
         results_list = _build_results_list(recent_docs, mode)
-        has_more = bool(recent_next_offset)
+        if want_group:
+            grouped = group_results(results_list)
+            display_items = grouped[:lim]
+            has_more = bool(recent_next_offset) and len(grouped) >= lim
+            final_next = recent_next_offset if has_more else ""
+        else:
+            display_items = results_list
+            final_next = recent_next_offset
         return web.json_response({
-            "results": group_results(results_list) if want_group else results_list,
-            "total": off + len(results_list) + (1 if has_more else 0),
-            "next_offset": recent_next_offset,
+            "results": display_items,
+            "total": off + len(display_items) + (1 if bool(final_next) else 0),
+            "next_offset": final_next,
             "is_admin": role == "admin",
             "is_recent": True,
         }, dumps=fast_json)
 
-    if off == 0:
+    # ग्रुपिंग केस में ट्रेंडिंग कैश का उपयोग नहीं — उसमें केवल lim रिजल्ट्स होते हैं,
+    # ग्रुपिंग के बाद डिस्प्ले कार्ड कम रह जाएंगे। हमेशा ताजा डेटा फेच करें।
+    if off == 0 and not want_group:
         trend_key = f"{col}_{mode}_{q.lower()}"
         now_ts = time.time()
         if trend_key in TRENDING_CACHE and TRENDING_CACHE[trend_key]["expiry"] > now_ts:
             cached = TRENDING_CACHE[trend_key]
-            
+
             if cached["next_offset"]:
                 asyncio.create_task(bg_prefetch_worker(tg_id, q, col, mode, cached["next_offset"], lim))
 
             return web.json_response({
-                "results": group_results(cached["results"]) if want_group else cached["results"],
+                "results": cached["results"],
                 "total": off + len(cached["results"]) + (1 if cached["next_offset"] else 0),
                 "next_offset": cached["next_offset"],
                 "is_admin": role == "admin"
@@ -535,7 +548,7 @@ async def api_search(req):
 
     if not all_m:
         all_m, next_offset, _, _ = await get_search_results(
-            q, lim, offset=off, collection_type=col, bypass_count=True
+            q, fetch_lim, offset=off, collection_type=col, bypass_count=True
         )
 
     has_more = bool(next_offset)
@@ -545,7 +558,7 @@ async def api_search(req):
 
     results_list = _build_results_list(all_m, mode)
 
-    if off == 0 and results_list:
+    if off == 0 and results_list and not want_group:
         trend_key = f"{col}_{mode}_{q.lower()}"
         TRENDING_CACHE[trend_key] = {
             "results": results_list,
@@ -553,10 +566,19 @@ async def api_search(req):
             "expiry": time.time() + TRENDING_CACHE_TTL
         }
 
+    if want_group:
+        grouped = group_results(results_list)
+        display_items = grouped[:lim]
+        has_more_disp = bool(next_offset) and len(grouped) >= lim
+        final_next = next_offset if has_more_disp else ""
+    else:
+        display_items = results_list
+        final_next = next_offset
+
     return web.json_response({
-        "results": group_results(results_list) if want_group else results_list,
-        "total": off + len(results_list) + (1 if has_more else 0),
-        "next_offset": next_offset,
+        "results": display_items,
+        "total": off + len(display_items) + (1 if bool(final_next) else 0),
+        "next_offset": final_next,
         "is_admin": role == "admin",
     }, dumps=fast_json)
 

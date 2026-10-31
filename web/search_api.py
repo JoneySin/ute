@@ -7,7 +7,6 @@ import time
 import hmac
 import hashlib
 import zlib
-import html as _html
 import asyncio
 import logging
 import urllib.parse
@@ -22,6 +21,9 @@ from info import BIN_CHANNEL, ADMINS, BOT_TOKEN, MAX_WEB_RESULTS, MAX_THUMB_CACH
 from database.ia_filterdb import COLLECTIONS, get_search_results, get_recent_files, db as filter_db, delete_single_file, build_media_meta, doc_resolution_text, msg_media
 from media_probe import probe_telegram_file, should_probe_media
 from database.users_chats_db import db
+# 🗂️ MANUAL QUALITY GROUPS — admin ke banaye groups (DB me persist) + unke rules
+from database import file_groups as fg
+from web.grouping import build_groups, group_key, plan_page, strip_internal
 # ✅ SYNC FIX: cookie-session identity check अब यहाँ दोबारा नहीं लिखा, web_assets से reuse हो रहा है
 # ✅ DRY: fast_json भी अब web_assets से ही आता है (पहले search_api/actor_routes/
 # post_routes तीनों में इसकी अलग-अलग copy थी)।
@@ -359,111 +361,100 @@ def _build_results_list(all_m, mode):
 
 
 # ─────────────────────────────────────────────────────────
-# 🗂️ QUALITY GROUPING — ek hi title ki alag-alag quality ek card me
-# Dashboard `&group=1` bhejta hai. Naam se resolution token (480p/720p/1080p/1440p/2160p/4k)
-# aur aakhri extension (mp4/mkv…) hata kar baaki naam EXACT same ho → ek group.
-# Conservative hai: codec/uploader tag (x265, Sky, UnTuch…) alag ho to alag card rahenge.
-# Grouping sirf is page ke results me hoti hai (offset-pagination ke saath safe).
+# 🗂️ QUALITY GROUPING — pure rules web/grouping.py me, yahan sirf DB glue + pagination
+# Dashboard `&group=1` bhejta hai. Do tarah ke groups:
+#   1. AUTO   — ek hi title ki alag-alag quality (480p/720p/1080p…) ek card me.
+#   2. MANUAL — admin ne web UI se banaya group (DB me save, apna naam + thumbnail).
+#               Isme alag-alag naam wali files bhi jodi ja sakti hain, aur group ki
+#               `key` match hone par nayi uploaded files khud attach ho jaati hain.
+#
+# ⚠️ PAGINATION FIX: pehle page ke liye seedha MAX_WEB_RESULTS (21) raw docs laakar
+# group kiya jaata tha — 21 files 3-4 group me simat jaati thi, isliye grid me sirf
+# 5-6 card dikhte the. Ab jab tak 21 CARD (single + group) na ban jaayein, DB se
+# batches me docs laaye jaate hain, aur next_offset group boundary par set hota
+# hai (koi group beech se nahi tootta).
 # ─────────────────────────────────────────────────────────
-_RES_TOKEN_RE = re.compile(
-    r"(?<![A-Za-z0-9])(?:(?:240|360|480|540|576|720|1080|1440|2160|4320)\s*[pP]|4[kK]|8[kK]|[uU][hH][dD])(?![A-Za-z0-9])")
-_EXT_TAIL_RE = re.compile(
-    r"[\s._\-]*(?<![A-Za-z0-9])(?:mp4|mkv|avi|mov|webm|m4v|ts|wmv|flv|mpg|mpeg)\s*$", re.I)
-_SEP_RE = re.compile(r"[\s|_\-–.,:;()\[\]{}+~!@#$%^&*=/\\'\"`<>?·•]+")
+GROUP_FETCH_BATCH = 30      # ek DB call me kitne raw docs
+GROUP_MAX_RAW = 240         # safety cap — ek page ke liye max raw docs scan
 
 
-def _group_key(name):
-    """Quality/extension hata kar normalized key. Khali ho to '' (matlab group mat karo)."""
-    s = _EXT_TAIL_RE.sub("", str(name or ""))
-    s = _RES_TOKEN_RE.sub(" ", s).lower()
-    return _SEP_RE.sub(" ", s).strip()
+def _group_thumb_url(g):
+    """Manual group ke master thumbnail ka URL (thumb badalne par v badal jaata hai)."""
+    salt = f"{g.get('thumb_url') or ''}|{g.get('updated_on') or 0}"
+    v = f"{zlib.crc32(salt.encode('utf-8')):08x}"
+    return f"/api/group_thumb?gid={g['_id']}&v={v}"
 
 
-def _group_title(name):
-    """Dikhane layak saaf title (original case me), quality + extension hata kar."""
-    s = _EXT_TAIL_RE.sub("", str(name or ""))
-    s = _RES_TOKEN_RE.sub(" ", s)
-    s = re.sub(r"([|\-–_.])(\s*\1)+", r"\1", s)          # '| |' / '..' jaise doble separator
-    s = re.sub(r"\s+", " ", s)
-    s = re.sub(r"^[\s|\-–_.]+|[\s|\-–_.]+$", "", s)
-    return s
+async def _manual_groups_for(results, mode):
+    """Page ke results se jude manual groups resolve karo (members + auto-key dono se).
 
-
-def _quality_label(res_text, name=""):
-    """(label, sort_height). res "1920×1080" se; na ho to naam ke token se; warna ('', 0)."""
-    m = re.search(r"(\d{3,5})\D+(\d{3,5})", str(res_text or ""))
-    eh = 0
-    if m:
-        w, h = int(m.group(1)), int(m.group(2))
-        eh = max(h, int(w * 9 / 16))          # 1920×800 (scope) bhi 1080p ginta hai
-    else:
-        t = _RES_TOKEN_RE.search(str(name or "")) or _RES_TOKEN_RE.search(str(res_text or ""))
-        if t:
-            tok = t.group(0).lower().replace(" ", "")
-            eh = {"4k": 2160, "8k": 4320, "uhd": 2160}.get(tok) or int(re.sub(r"\D", "", tok) or 0)
-    if not eh:
-        return "", 0
-    for lim, lab in ((4000, "8K"), (2000, "2160p"), (1300, "1440p"), (1000, "1080p"),
-                     (650, "720p"), (450, "480p"), (330, "360p"), (220, "240p")):
-        if eh >= lim:
-            return lab, eh
-    return f"{eh}p", eh
-
-
-def group_results(results):
-    """results_list ko quality-groups me badalta hai.
-
-    - Akeli file → jaisi thi waisi (koi badlaav nahi)
-    - 2+ files same title → {"group": True, "key", "title", "count", "type", "tg_thumb",
-      "chips": [{"label","count"}], "variants": [<original result + "ql">...]}  (quality ascending)
-    - Page me group ki jagah uski PEHLI file ki position rehti hai (search ranking bani rehti hai).
-    - Input dicts mutate nahi hote (TRENDING_CACHE unhi dicts ko share karta hai).
+    Har group ke saare saved members ke result dicts bhi laaye jaate hain (chahe wo
+    is page par na hon), taaki group card me poori quality list dikhe.
     """
-    order, buckets = [], {}
-    for r in results:
-        k = _group_key(r.get("name"))
-        if not k:                                   # naam me kuch bacha hi nahi → akela
-            order.append(("single", r))
-            continue
-        if k not in buckets:
-            buckets[k] = []
-            order.append(("group", k))
-        buckets[k].append(r)
-
-    out = []
-    for kind, v in order:
-        if kind == "single":
-            out.append(v)
-            continue
-        items = buckets[v]
-        if len(items) == 1:
-            out.append(items[0])
-            continue
-        variants = []
-        for it in items:
-            lab, eh = _quality_label(it.get("res"), it.get("name"))
-            variants.append((eh, dict(it, ql=lab)))
-        variants.sort(key=lambda x: x[0])           # stable: barabar quality me original order
-        vlist = [d for _, d in variants]
-        chips, seen = [], {}
-        for d in vlist:
-            lab = d["ql"] or "?"
-            if lab in seen:
-                seen[lab]["count"] += 1
-            else:
-                seen[lab] = {"label": lab, "count": 1}
-                chips.append(seen[lab])
-        out.append({
-            "group": True,
-            "key": f"{zlib.crc32(v.encode('utf-8')):08x}",
-            "title": _html.escape(_group_title(items[0].get("name")) or str(items[0].get("name") or "")),
-            "count": len(vlist),
-            "type": items[0].get("type", "VIDEO"),
-            "tg_thumb": next((d.get("tg_thumb") for d in vlist if d.get("tg_thumb")), ""),
-            "chips": chips,
-            "variants": vlist,
-        })
+    if not results:
+        return {}
+    fids = [r.get("file_id") for r in results if r.get("file_id")]
+    keys = list({k for k in (group_key(r.get("name")) for r in results) if k})
+    try:
+        docs = await fg.groups_for_page(fids=fids, keys=keys)
+    except Exception as e:
+        logger.warning(f"Manual group lookup failed: {e}")
+        return {}
+    out = {}
+    for g in docs:
+        members = fg.clean_members(g.get("members"))
+        try:
+            variants = _build_results_list(await fg.fetch_member_docs(members), mode)
+        except Exception as e:
+            logger.debug(f"Group members fetch failed {g.get('_id')}: {e}")
+            variants = []
+        out[str(g["_id"])] = {
+            "gid": str(g["_id"]),
+            "title": g.get("title") or "",
+            "key": g.get("key") or "",
+            "thumb": _group_thumb_url(g),
+            "members": [m["fid"] for m in members],
+            "variants": variants,
+        }
     return out
+
+
+async def _grouped_page(q, col, mode, offset, target, recent=False):
+    """Grouped search ka ek page — `target` jitne CARD (single + group) lautata hai.
+
+    Return: (cards, next_offset) — next_offset raw-doc offset hai (dashboard ise
+    `offset` ki tarah wapas bhejta hai), '' matlab aur pages nahi hain.
+    """
+    raw_docs, cards, cur, next_raw = [], [], offset, ""
+    while True:
+        if recent:
+            docs, nxt = await get_recent_files(GROUP_FETCH_BATCH, offset=cur, collection_type=col)
+        else:
+            docs, nxt, _, _ = await get_search_results(
+                q, GROUP_FETCH_BATCH, offset=cur, collection_type=col, bypass_count=True
+            )
+        if docs:
+            raw_docs.extend(docs)
+            cur += len(docs)
+            next_raw = nxt or ""
+        else:
+            next_raw = ""
+
+        results = _build_results_list(raw_docs, mode)
+        cards = build_groups(results, await _manual_groups_for(results, mode))
+
+        if len(cards) > target or not next_raw or len(raw_docs) >= GROUP_MAX_RAW:
+            break
+
+    if not cards:
+        return [], ""
+
+    page_cards, cut = plan_page(cards, target)
+    if cut is not None:
+        next_offset = offset + cut
+    else:
+        next_offset = cur if next_raw else ""
+    return strip_internal(page_cards), next_offset
 
 
 @search_routes.get("/api/search")
@@ -478,6 +469,10 @@ async def api_search(req):
     mode = req.query.get("mode", DEFAULT_MEDIA_MODE).lower()
     want_group = req.query.get("group", "") == "1"     # dashboard hi bhejta hai; baaki users raw list
 
+    if col != "all" and col not in COLLECTIONS:
+        col = "all"
+    if mode not in ("tg", "none"):
+        mode = DEFAULT_MEDIA_MODE
     try:
         off = max(0, int(off))
     except Exception:
@@ -488,28 +483,69 @@ async def api_search(req):
     # 🆕 कोई query नहीं दी गई — dashboard पर खाली स्क्रीन दिखाने की बजाय
     # सबसे नई अपलोड की गई फाइलें (Recently Added) दिखाओ
     if not q:
+        if want_group:
+            cards, next_offset = await _grouped_page("", col, mode, off, lim, recent=True)
+            return web.json_response({
+                "results": cards,
+                "total": off + len(cards) + (1 if next_offset else 0),
+                "next_offset": next_offset,
+                "is_admin": role == "admin",
+                "is_recent": True,
+            }, dumps=fast_json)
         recent_docs, recent_next_offset = await get_recent_files(lim, offset=off, collection_type=col)
         results_list = _build_results_list(recent_docs, mode)
         has_more = bool(recent_next_offset)
         return web.json_response({
-            "results": group_results(results_list) if want_group else results_list,
+            "results": results_list,
             "total": off + len(results_list) + (1 if has_more else 0),
             "next_offset": recent_next_offset,
             "is_admin": role == "admin",
             "is_recent": True,
         }, dumps=fast_json)
 
+    # ── GROUPED MODE (dashboard) ──────────────────────────────
+    # Har page par 21 CARD aate hain (na ki 21 files jo 5-6 group me simat jaayein).
+    if want_group:
+        trend_key = f"G|{col}|{mode}|{q.lower()}"
+        if off == 0:
+            cached = TRENDING_CACHE.get(trend_key)
+            if cached and cached.get("expiry", 0) > time.time():
+                return web.json_response({
+                    "results": cached["cards"],
+                    "total": len(cached["cards"]) + (1 if cached["next_offset"] else 0),
+                    "next_offset": cached["next_offset"],
+                    "is_admin": role == "admin",
+                }, dumps=fast_json)
+
+        cards, next_offset = await _grouped_page(q, col, mode, off, lim)
+
+        if off == 0 and cards:
+            TRENDING_CACHE[trend_key] = {
+                "cards": cards,
+                "next_offset": next_offset,
+                "expiry": time.time() + TRENDING_CACHE_TTL,
+                "grouped": True,
+            }
+
+        return web.json_response({
+            "results": cards,
+            "total": off + len(cards) + (1 if next_offset else 0),
+            "next_offset": next_offset,
+            "is_admin": role == "admin",
+        }, dumps=fast_json)
+
+    # ── RAW MODE (miniapp/other clients) ──────────────────────
     if off == 0:
         trend_key = f"{col}_{mode}_{q.lower()}"
         now_ts = time.time()
         if trend_key in TRENDING_CACHE and TRENDING_CACHE[trend_key]["expiry"] > now_ts:
             cached = TRENDING_CACHE[trend_key]
-            
+
             if cached["next_offset"]:
                 asyncio.create_task(bg_prefetch_worker(tg_id, q, col, mode, cached["next_offset"], lim))
 
             return web.json_response({
-                "results": group_results(cached["results"]) if want_group else cached["results"],
+                "results": cached["results"],
                 "total": off + len(cached["results"]) + (1 if cached["next_offset"] else 0),
                 "next_offset": cached["next_offset"],
                 "is_admin": role == "admin"
@@ -544,7 +580,7 @@ async def api_search(req):
         }
 
     return web.json_response({
-        "results": group_results(results_list) if want_group else results_list,
+        "results": results_list,
         "total": off + len(results_list) + (1 if has_more else 0),
         "next_offset": next_offset,
         "is_admin": role == "admin",
@@ -572,6 +608,59 @@ async def get_telegram_thumb(req):
         return web.Response(status=404)
 
     return web.Response(body=res, content_type="image/jpeg", headers=headers)
+
+
+# ─────────────────────────────────────────────────────────
+# 🗂️ MANUAL GROUP MASTER THUMBNAIL
+# Admin ne group ke liye jo thumbnail upload kiya ho wahi serve hota hai; na ho to
+# group ke pehle member ka thumbnail fallback hai. Custom thumb `TG_ID:` ke roop me
+# DB me save hota hai (jaise normal file ke thumb_url me), isliye restart ke baad
+# bhi bana rehta hai. Cache key me group + thumb dono hain — thumb badla to URL ka
+# `v` bhi badal jaata hai (search_api._group_thumb_url), isliye purana cache kabhi
+# galat poster nahi dikhata.
+# ─────────────────────────────────────────────────────────
+@search_routes.get("/api/group_thumb")
+async def api_group_thumb(req):
+    gid = (req.query.get("gid") or "").strip()
+    if not gid:
+        return web.Response(status=400)
+
+    group = await fg.get_group_raw(gid)
+    if not group:
+        return web.Response(status=404)
+
+    headers = {
+        "Content-Disposition": 'inline; filename="group-poster.jpg"',
+        "Cache-Control": "max-age=86400",
+    }
+
+    raw = str(group.get("thumb_url") or "").strip()
+    if raw.startswith("TG_ID:"):
+        cache_key = f"grp:{group['_id']}:{raw}"
+        if cache_key in thumb_cache:
+            cached_val = thumb_cache[cache_key]
+            if cached_val != "NO_THUMB":
+                return web.Response(body=cached_val, content_type="image/jpeg", headers=headers)
+        try:
+            file_data = await temp.BOT.download_media(raw.replace("TG_ID:", ""), in_memory=True)
+            if file_data:
+                img_bytes = file_data.getvalue()
+                thumb_cache[cache_key] = img_bytes
+                return web.Response(body=img_bytes, content_type="image/jpeg", headers=headers)
+        except Exception as e:
+            logger.debug(f"Group thumb fetch failed {gid}: {e}")
+        thumb_cache[cache_key] = "NO_THUMB"
+
+    # fallback — group ke members ke normal thumbnails
+    for m in (group.get("members") or []):
+        try:
+            data = await _get_or_fetch_thumb(m.get("fid"), col_name=m.get("col") or "primary")
+        except Exception:
+            data = None
+        if data:
+            return web.Response(body=data, content_type="image/jpeg", headers=headers)
+
+    return web.Response(status=404)
 
 
 # ─────────────────────────────────────────────────────────

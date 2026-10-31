@@ -46,6 +46,7 @@ from info import (
 from utils import temp
 from database.users_chats_db import db
 from database.ia_filterdb import ensure_indexes
+from database.file_groups import ensure_group_indexes
 from plugins.premium import check_premium_expired
 
 # ❌ DEAD CODE REMOVED: यहाँ एक `/health` route था, पर web/dashboard_routes.py में
@@ -108,6 +109,7 @@ class Bot(Client):
 
         # 2. Database Indexes Sync (Makkhan DB Tuning)
         await ensure_indexes()
+        await ensure_group_indexes()
         await db._ensure_indexes() 
         logger.info("✅ Database Connections & Indexes Fully Synced")
 

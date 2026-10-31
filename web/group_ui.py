@@ -7,6 +7,10 @@ Modal ek hi jagah se teeno kaam karta hai:
   • naya group banana (naam + thumbnail),
   • maujooda group ka naam/thumbnail badalna,
   • alag-alag naam wali files ko search karke group me jodna / nikaalna.
+
+Dashboard par group card ka THUMBNAIL tap karne par action row khulti hai:
+Manage (yahi modal) / Migrate (doosre group me merge) / Delete.
+Group ka NAAM tap karne par uski saari files khulti hain.
 """
 
 GROUP_UI_CSS = """<style>
@@ -54,6 +58,11 @@ GROUP_UI_CSS = """<style>
 .gm-gname{font-size:12.5px;font-weight:800;color:var(--text);line-height:1.4;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .gm-gmeta{font-size:10.5px;color:var(--muted);margin-top:5px;display:flex;gap:6px;flex-wrap:wrap}
 .gm-gmeta b{color:#ffd166;font-weight:800}
+/* 🔀 migrate popup */
+.gm-migrow{cursor:pointer;transition:border-color .15s,background .15s}
+.gm-migrow:hover{border-color:var(--accent);background:var(--bg4)}
+.gm-migrow .gm-add{margin-left:auto}
+.gm-mig-title{font-size:11.5px;font-weight:900;color:#ffd166;margin:2px 0 8px}
 </style>"""
 
 
@@ -94,6 +103,21 @@ GROUP_MODAL_HTML = """
     </div>
 </div>
 """
+
+# 🔀 MIGRATE popup — group ki saari files doosre group me daal do.
+GROUP_MIGRATE_HTML = """
+<div class="edit-modal" id="grpMigModal" onclick="if(event.target===this)closeGrpMig()">
+    <div class="em-card gm-card" style="max-width:540px">
+        <button class="em-close" onclick="closeGrpMig()">&#10005;</button>
+        <div class="em-title">&#128256; Migrate Group</div>
+        <div class="gm-hint" id="grpMigHint">Is group ki saari files unke naye group me chali jayengi. Purana group delete ho jayega &mdash; files delete nahi hongi.</div>
+        <div class="gm-mig-title" id="grpMigSrc"></div>
+        <input type="text" id="grpMigQ" class="em-input" placeholder="Target group ka naam search karo&hellip;" oninput="grpMigFilter()">
+        <div class="gm-results" id="grpMigList"></div>
+    </div>
+</div>
+"""
+
 
 
 GROUP_UI_JS = """<script>
@@ -268,6 +292,88 @@ function gmDelete(){
             showToast('\\u2705 Group deleted');
             closeGroupModal();
             if(typeof gmPageReload === 'function'){ gmPageReload(); } else { refreshGridAfterEdit(); }
+        }).catch(function(){ showToast('Network error','error'); });
+}
+
+/* ── 🗂️ Group card ke thumbnail popup ke teen action ── */
+function grpManage(gid){
+    if(!gid) return;
+    openGroupModal(null, null, gid);
+}
+
+function grpMigrate(gid){
+    if(!gid) return;
+    openMigrateModal(gid);
+}
+
+function grpDeleteGroup(gid){
+    if(!gid) return;
+    if(!confirm('Ye group delete kar dein? Files delete nahi hongi, sirf grouping hat jayegi.')) return;
+    fetch('/api/group/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({gid:gid})})
+        .then(function(r){return r.json();}).then(function(d){
+            if(!d.success){ showToast(d.error||'Delete failed','error'); return; }
+            showToast('\u2705 Group deleted');
+            grpAfterChange();
+        }).catch(function(){ showToast('Network error','error'); });
+}
+
+function grpAfterChange(){
+    if(typeof gmPageReload === 'function'){ gmPageReload(); return; }
+    if(typeof refreshGridAfterEdit === 'function'){ refreshGridAfterEdit(); }
+}
+
+/* 🔀 Migrate: is group ki saari files kisi doosre group me merge */
+var GMIG = {gid:'', groups:[]};
+
+function openMigrateModal(gid){
+    if(!gid) return;
+    GMIG = {gid:gid, groups:[]};
+    var el = document.getElementById('grpMigModal');
+    if(!el) return;
+    document.getElementById('grpMigQ').value = '';
+    document.getElementById('grpMigSrc').textContent = '';
+    document.getElementById('grpMigList').innerHTML = '<div class="gm-empty">Loading&hellip;</div>';
+    el.classList.add('open');
+    fetch('/api/groups').then(function(r){return r.json();}).then(function(d){
+        GMIG.groups = (d.groups||[]).filter(function(g){return g.gid!==GMIG.gid;});
+        var src = (d.groups||[]).filter(function(g){return g.gid===GMIG.gid;})[0];
+        if(src){ document.getElementById('grpMigSrc').textContent = 'Source: '+src.title+' ('+src.count+' files)'; }
+        grpMigFilter();
+    }).catch(function(){
+        document.getElementById('grpMigList').innerHTML = '<div class="gm-empty">Groups load nahi hue.</div>';
+    });
+}
+
+function closeGrpMig(){
+    var el = document.getElementById('grpMigModal');
+    if(el) el.classList.remove('open');
+}
+
+function grpMigFilter(){
+    var q = (document.getElementById('grpMigQ').value||'').toLowerCase();
+    var list = GMIG.groups.filter(function(g){
+        return !q || String(g.title||'').toLowerCase().indexOf(q) >= 0;
+    });
+    var box = document.getElementById('grpMigList');
+    if(!list.length){ box.innerHTML = '<div class="gm-empty">Koi doosra group nahi mila.</div>'; return; }
+    box.innerHTML = list.map(function(g){
+        return '<div class="gm-mrow gm-migrow" onclick="grpMigDo(\\''+g.gid+'\\')">'+
+            '<img class="gm-mthumb" src="'+gmEsc(g.thumb||'')+'" loading="lazy" onerror="this.style.visibility=\\'hidden\\'">'+
+            '<div class="gm-mbody"><div class="gm-mname">'+gmEsc(g.title)+'</div>'+
+            '<div class="gm-mmeta">'+g.count+' files</div></div>'+
+            '<button class="gm-add">&#128256; Merge</button></div>';
+    }).join('');
+}
+
+function grpMigDo(target){
+    if(!GMIG.gid || !target) return;
+    var src = GMIG.gid;
+    fetch('/api/group/migrate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({gid:src,target:target})})
+        .then(function(r){return r.json();}).then(function(d){
+            if(!d.success){ showToast(d.error||'Migrate failed','error'); return; }
+            showToast('\u2705 Group migrated');
+            closeGrpMig();
+            grpAfterChange();
         }).catch(function(){ showToast('Network error','error'); });
 }
 </script>"""

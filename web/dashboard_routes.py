@@ -4,7 +4,7 @@ from web.web_assets import build_page, get_auth, form_wrapper, MAX_WEB_RESULTS, 
 from utils import temp
 from database.users_chats_db import web_db
 # 🗂️ Admin group modal (dashboard file cards ke 🗂 button se khulta hai)
-from web.group_ui import GROUP_UI_CSS, GROUP_MODAL_HTML, GROUP_UI_JS
+from web.group_ui import GROUP_UI_CSS, GROUP_MODAL_HTML, GROUP_MIGRATE_HTML, GROUP_UI_JS
 
 dashboard_routes = web.RouteTableDef()
 
@@ -83,12 +83,13 @@ CARD_CSS = """
 .grp-qlabels{display:flex;gap:4px;overflow:hidden;flex-wrap:nowrap;min-width:0}
 .grp-qlabel{background:rgba(0,0,0,.66);color:#ffd166;border:1px solid rgba(255,209,102,.35);border-radius:5px;padding:2px 6px;font-size:9.5px;font-weight:800;white-space:nowrap}
 .grp-caret{margin-left:auto;flex-shrink:0;width:19px;height:19px;border-radius:50%;background:rgba(0,0,0,.62);border:1px solid rgba(255,255,255,.22);color:#fff;font-size:9px;display:flex;align-items:center;justify-content:center;transition:transform .2s}
+.grp-name{display:flex;align-items:center;gap:6px;cursor:pointer}
+.grp-name .grp-caret{margin-left:auto}
 .grp-card.open .grp-caret{transform:rotate(180deg)}
-.grp-chips{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px}
-.grp-chip{background:var(--bg3);color:#fbbf24;border:1px solid var(--border);border-radius:6px;font-size:10px;font-weight:800;padding:2px 7px}
-.grp-chip i{font-style:normal;opacity:.7}
-.grp-manage{align-self:flex-start;margin-top:8px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:4px 9px;font-size:10.5px;font-weight:800;cursor:pointer;font-family:inherit;transition:border-color .15s,color .15s}
-.grp-manage:hover{border-color:var(--accent);color:var(--accent)}
+/* 📸 Thumbnail tap par admin action row (Manage / Migrate / Delete) khulti hai —
+   tab quality bar chhup jaati hai taaki buttons saaf dikhein. */
+.grp-card.admin-active .grp-qbar{opacity:0;transition:opacity .15s}
+.grp-card .poster-admin .btn-grp{background:rgba(120,90,10,.88)}
 .grp-variants{display:none;border-top:1px solid var(--border);background:var(--bg2)}
 .grp-card.open .grp-variants{display:grid;grid-template-columns:1fr;gap:8px;padding:10px}
 @media(min-width:600px){.grp-card.open .grp-variants{grid-template-columns:repeat(3,1fr)}}
@@ -250,29 +251,39 @@ function cardHtml(f,nested){
 }
 
 /* 🗂️ Ek title ki alag-alag quality ka group card.
-   Master thumbnail normal file card jaisa bada hota hai; uske ANDAR neeche
-   "3 Qualities" + quality labels ka bar hota hai. Tap karne par andar har
-   quality ka poora card khulta hai (naam-click, Edit, Delete sab pehle jaise). */
+   • Naam par click → group khulta hai aur uski saari files dikh jaati hain.
+   • Thumbnail par click → admin ke liye action row (Manage / Migrate / Delete),
+     bilkul waise hi jaise file card me Edit/Delete ka popup aata hai.
+   • Quality count + labels thumbnail ke ANDAR, neeche.
+   Naam ke neeche koi extra text/button nahi hota. */
 function groupHtml(g){
     var open=openGroups[g.key]?' open':'';
     var vlist=g.variants||[];
     var labels=(g.labels||[]).map(function(l){return '<span class="grp-qlabel">'+l+'</span>';}).join('');
     var labelsText=(g.labels||[]).join(' · ');
-    var chips='';
-    (g.chips||[]).forEach(function(c){
-        chips+='<span class="grp-chip">'+c.label+(c.count>1?' <i>x'+c.count+'</i>':'')+'</span>';
-    });
     var qWord=(g.count===1?'Quality':'Qualities');
     var master=vlist[0]||{};
-    var manage='';
-    if(isAdminView && master.file_id){
-        manage='<button class="grp-manage" onclick="event.stopPropagation();openGroupModal(\\''+master.file_id+'\\',\\''+(master.raw_collection||'primary')+'\\')">&#128451; Manage Group</button>';
+
+    /* admin action row — thumbnail ke neeche wali patti (tap par khulti hai) */
+    var adminBtns='';
+    if(isAdminView && g.manual && g.gid){
+        adminBtns='<div class="poster-admin">'+
+            '<button class="btn-edit" onclick="event.stopPropagation();grpManage(\\''+g.gid+'\\')">&#128451; Manage</button>'+
+            '<button class="btn-grp" onclick="event.stopPropagation();grpMigrate(\\''+g.gid+'\\')">&#128256; Migrate</button>'+
+            '<button class="btn-del" onclick="event.stopPropagation();grpDeleteGroup(\\''+g.gid+'\\')">&#128465; Delete</button>'+
+        '</div>';
+    } else if(isAdminView && master.file_id){
+        /* auto group: pehle manage karke DB group banao */
+        adminBtns='<div class="poster-admin">'+
+            '<button class="btn-edit" onclick="event.stopPropagation();openGroupModal(\\''+master.file_id+'\\',\\''+(master.raw_collection||'primary')+'\\')">&#128451; Manage</button>'+
+        '</div>';
     }
+    var tapFn=adminBtns?"toggleAdminBtns(this.closest('.grp-card'),event)":"toggleGroup(this.closest('.grp-card'),event)";
 
     var poster='';
     if(pMode!=='none'){
         var thumb=g.tg_thumb||master.tg_thumb||'';
-        poster='<div class="poster-box grp-poster-box" onclick="toggleGroup(this.closest(\\'.grp-card\\'),event)">'+
+        poster='<div class="poster-box grp-poster-box" onclick="'+tapFn+'">'+
             '<img src="'+thumb+'" class="fc-poster" onload="this.classList.add(\\'loaded\\')" onerror="this.style.opacity=0" loading="lazy" decoding="async">'+
             '<div class="poster-top">'+
                 '<span class="type-chip">'+String(g.type||'VIDEO').toUpperCase()+'</span>'+
@@ -282,16 +293,16 @@ function groupHtml(g){
             '<div class="grp-qbar">'+
                 '<span class="grp-qcount">&#127916; '+g.count+' '+qWord+'</span>'+
                 '<span class="grp-qlabels">'+labels+'</span>'+
-                '<span class="grp-caret">&#9662;</span>'+
             '</div>'+
+            adminBtns+
         '</div>';
     } else {
-        poster='<div class="fc-text-info grp-text-info" onclick="toggleGroup(this.closest(\\'.grp-card\\'),event)">'+
+        poster='<div class="fc-text-info grp-text-info" onclick="'+tapFn+'">'+
             '<span class="tc-type">'+String(g.type||'VIDEO').toUpperCase()+'</span>'+
             '<span class="grp-text-count">&#127916; '+g.count+' '+qWord+'</span>'+
             '<span class="tc-res">'+labelsText+'</span>'+
-            '<span class="grp-caret-text">&#9662;</span>'+
         '</div>';
+        if(adminBtns){ poster+=adminBtns.replace('poster-admin','text-admin-row'); }
     }
 
     var inner='';
@@ -299,9 +310,10 @@ function groupHtml(g){
     return '<div class="file-card grp-card card-enter'+open+'" data-gk="'+g.key+'">'+
         poster+
         '<div class="fc-body">'+
-            '<div class="fc-name grp-name" onclick="toggleGroup(this.closest(\\'.grp-card\\'),event)">'+g.title+'</div>'+
-            (chips?'<div class="grp-chips">'+chips+'</div>':'')+
-            manage+
+            '<div class="fc-name grp-name" onclick="toggleGroup(this.closest(\\'.grp-card\\'),event)" title="Saari files dekhne ke liye naam par click karein">'+
+                '<span class="grp-name-text">'+g.title+'</span>'+
+                '<span class="grp-caret">&#9662;</span>'+
+            '</div>'+
         '</div>'+
         '<div class="grp-variants">'+inner+'</div>'+
     '</div>';
@@ -488,7 +500,7 @@ async def dash(req):
     body = DASHBOARD_BODY
     if role == "admin":
         # Group modal + shortcut sirf admin ke page par (users ko extra JS/CSS nahi)
-        body = (DASHBOARD_BODY + GROUP_UI_CSS + GROUP_MODAL_HTML + GROUP_UI_JS
+        body = (DASHBOARD_BODY + GROUP_UI_CSS + GROUP_MODAL_HTML + GROUP_MIGRATE_HTML + GROUP_UI_JS
                 + '<a href="/groups" class="dash-groups-fab" title="Saare quality groups manage karo">'
                   '<span style="font-size:15px">&#128451;</span> Quality Groups</a>')
     return build_page("Home - Fast Finder", body, "", "dash", role)

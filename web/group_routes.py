@@ -4,7 +4,8 @@ Admin yahan se:
   • naya group bana sakta hai (naam + thumbnail),
   • group ka naam ya master thumbnail badal sakta hai,
   • alag-alag naam wali files ko search karke group me jod sakta hai,
-  • member nikaal sakta hai / poora group delete kar sakta hai.
+  • member nikaal sakta hai / poora group delete kar sakta hai,
+  • ek group ki saari files doosre group me migrate (merge) kar sakta hai.
 
 Sab kuch MongoDB (FileGroups) me save hota hai — dobara grouping nahi karni padti.
 Search results me ye groups web/search_api.py ke `_manual_groups_for()` se merge
@@ -24,7 +25,7 @@ from database import file_groups as fg
 from database.ia_filterdb import FILE_COLLECTIONS, get_search_results, doc_resolution_text
 from web.grouping import group_key, group_title, shortcut_title, quality_label, suggest_score
 from web.web_assets import build_page, get_auth, fast_json
-from web.group_ui import GROUP_UI_CSS, GROUP_MODAL_HTML, GROUP_UI_JS
+from web.group_ui import GROUP_UI_CSS, GROUP_MODAL_HTML, GROUP_MIGRATE_HTML, GROUP_UI_JS
 from web.search_api import get_user_role, TRENDING_CACHE, PREFETCH_CACHE
 
 logger = logging.getLogger(__name__)
@@ -424,6 +425,50 @@ async def api_group_delete(req):
     return web.json_response({"success": ok}, dumps=fast_json)
 
 
+@group_routes.post("/api/group/migrate")
+async def api_group_migrate(req):
+    """Source group ki saari files target group me merge karke source delete.
+
+    Files delete nahi hoti — sirf grouping move hoti hai. Merge ke baad target
+    group ka title/thumbnail/key waisa hi rehta hai.
+    """
+    role, _ = await get_user_role(req)
+    if role != "admin":
+        return _forbidden()
+
+    try:
+        data = await req.json()
+    except Exception:
+        return web.json_response({"error": "Invalid payload!"}, status=400, dumps=fast_json)
+
+    gid = str(data.get("gid") or "").strip()
+    target = str(data.get("target") or "").strip()
+    if not gid or not target:
+        return web.json_response({"error": "Missing group id!"}, status=400, dumps=fast_json)
+    if gid == target:
+        return web.json_response({"error": "Same group me migrate nahi kar sakte!"}, status=400, dumps=fast_json)
+
+    try:
+        src = await fg.get_group(gid)
+        dst = await fg.get_group(target)
+        if not src or not dst:
+            return web.json_response({"error": "Group not found!"}, status=404, dumps=fast_json)
+
+        members = fg.clean_members(dst.get("members"))
+        seen = {m["fid"] for m in members}
+        for m in fg.clean_members(src.get("members")):
+            if m["fid"] not in seen:
+                seen.add(m["fid"])
+                members.append(m)
+
+        g = await fg.set_members(target, members)
+        await fg.delete_group(gid)
+        _clear_search_caches()
+        return web.json_response({"success": True, "group": await _group_payload(g)}, dumps=fast_json)
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500, dumps=fast_json)
+
+
 # ─────────────────────────────────────────────────────────
 # 📄 ADMIN PAGE — /groups
 # ─────────────────────────────────────────────────────────
@@ -481,5 +526,6 @@ async def groups_page(req):
     if role != 'admin':
         return web.HTTPFound('/dashboard')
 
-    body = GROUP_UI_CSS + _GROUPS_PAGE_HTML + GROUP_MODAL_HTML + _GROUPS_PAGE_JS + GROUP_UI_JS
+    body = (GROUP_UI_CSS + _GROUPS_PAGE_HTML + GROUP_MODAL_HTML + GROUP_MIGRATE_HTML
+            + _GROUPS_PAGE_JS + GROUP_UI_JS)
     return build_page("Quality Groups - Fast Finder", body, "", "groups", role)

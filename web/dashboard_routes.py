@@ -1,8 +1,12 @@
+import json
 import time
 from aiohttp import web
 from web.web_assets import build_page, get_auth, form_wrapper, MAX_WEB_RESULTS, require_active_plan, DEFAULT_MEDIA_MODE
 from utils import temp
 from database.users_chats_db import web_db
+# 🗂️ Admin group modal (dashboard file cards ke 🗂 button se khulta hai)
+from web.group_ui import (GROUP_UI_CSS, GROUP_MODAL_HTML, GROUP_MIGRATE_HTML, GROUP_UI_JS,
+                          GROUP_BASIS_HTML)
 
 dashboard_routes = web.RouteTableDef()
 
@@ -68,27 +72,47 @@ CARD_CSS = """
 .cdd-item.selected .cdd-radio{border-color:var(--accent)}
 .cdd-radio-dot{width:8px;height:8px;border-radius:50%;background:var(--accent);display:none}
 .cdd-item.selected .cdd-radio-dot{display:block}
-/* ── Quality group card ── */
-.grp-card{background:var(--card);border:1px solid var(--border);border-radius:10px;overflow:hidden;display:flex;flex-direction:column;transition:border-color .2s,box-shadow .2s}
-.grp-card:hover,.grp-card.open{border-color:var(--accent)}
-.grp-card.open{grid-column:1/-1;box-shadow:0 8px 28px rgba(0,0,0,.45)}
-.grp-head{display:flex;align-items:center;gap:12px;padding:12px 14px;cursor:pointer;-webkit-tap-highlight-color:transparent}
-.grp-poster{width:54px;height:76px;object-fit:cover;border-radius:6px;flex-shrink:0;background:var(--bg3)}
-.grp-main{flex:1;min-width:0}
-.grp-top{display:flex;align-items:center;gap:8px;margin-bottom:6px}
-.grp-type{background:var(--bg3);color:var(--muted);font-size:9px;font-weight:800;letter-spacing:.6px;padding:3px 7px;border-radius:5px;border:1px solid var(--border)}
-.grp-count{background:rgba(229,9,20,.14);color:var(--accent);font-size:9px;font-weight:800;letter-spacing:.5px;padding:3px 8px;border-radius:20px;border:1px solid rgba(229,9,20,.45)}
-.grp-arrow{margin-left:auto;color:var(--muted);font-size:13px;transition:transform .2s}
-.grp-card.open .grp-arrow{transform:rotate(180deg)}
-.grp-title{color:var(--text);font-size:12.5px;font-weight:700;line-height:1.45;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
-.grp-card.open .grp-title{-webkit-line-clamp:unset}
-.grp-chips{display:flex;flex-wrap:wrap;gap:5px;margin-top:7px}
-.grp-chip{background:var(--bg3);color:#fbbf24;border:1px solid var(--border);border-radius:6px;font-size:10px;font-weight:800;padding:2px 7px}
-.grp-chip i{font-style:normal;opacity:.7}
-.grp-variants{display:none;border-top:1px solid var(--border)}
+/* ── Quality group card ──
+   Group ka master thumbnail bilkul normal file card jaisa BADA dikhta hai; bas
+   thumbnail ke andar neeche "3 Qualities" + quality labels ka bar hota hai. */
+.file-card.grp-card{cursor:default}
+.grp-card.open{grid-column:1/-1;border-color:var(--accent);box-shadow:0 8px 28px rgba(0,0,0,.45)}
+.grp-poster-box{cursor:pointer}
+.grp-manual-chip{background:rgba(229,9,20,.16);color:#ff8a8a;border:1px solid rgba(229,9,20,.45);border-radius:5px;padding:3px 7px;font-size:9px;font-weight:800;letter-spacing:.6px;line-height:1.4}
+/* 👇 thumbnail ke ANDAR, neeche quality count */
+.grp-qbar{position:absolute;left:0;right:0;bottom:0;display:flex;align-items:center;gap:6px;padding:24px 9px 9px;background:linear-gradient(to top,rgba(0,0,0,.94),rgba(0,0,0,0));z-index:3;pointer-events:none}
+.grp-qcount{display:inline-flex;align-items:center;gap:5px;background:var(--accent);color:#fff;border:1px solid rgba(255,255,255,.25);border-radius:6px;padding:3px 9px;font-size:10.5px;font-weight:900;letter-spacing:.4px;white-space:nowrap;box-shadow:0 2px 10px rgba(0,0,0,.45)}
+.grp-qlabels{display:flex;gap:4px;overflow:hidden;flex-wrap:nowrap;min-width:0}
+.grp-qlabel{background:rgba(0,0,0,.66);color:#ffd166;border:1px solid rgba(255,209,102,.35);border-radius:5px;padding:2px 6px;font-size:9.5px;font-weight:800;white-space:nowrap}
+.grp-caret{margin-left:auto;flex-shrink:0;width:19px;height:19px;border-radius:50%;background:rgba(0,0,0,.62);border:1px solid rgba(255,255,255,.22);color:#fff;font-size:9px;display:flex;align-items:center;justify-content:center;transition:transform .2s}
+.grp-name{display:flex;align-items:center;gap:6px;cursor:pointer}
+.grp-name .grp-caret{margin-left:auto}
+.grp-card.open .grp-caret{transform:rotate(180deg)}
+/* 📸 Thumbnail tap par admin action row (Manage / Migrate / Delete) khulti hai —
+   tab quality bar chhup jaati hai taaki buttons saaf dikhein. */
+.grp-card.admin-active .grp-qbar{opacity:0;transition:opacity .15s}
+.grp-card .poster-admin .btn-grp{background:rgba(120,90,10,.88);border:1px solid rgba(255,209,102,.35);color:#ffd166}
+/* 🆔 har group ka id + ✅ verified / ⚠ unverified state */
+.grp-idchip{background:rgba(0,0,0,.72);border:1px solid rgba(255,255,255,.22);border-radius:5px;padding:3px 6px;font-size:9px;font-weight:900;letter-spacing:.3px;color:#cfd6e4;font-family:ui-monospace,Menlo,monospace;line-height:1.4}
+.grp-vchip{border-radius:5px;padding:3px 7px;font-size:9px;font-weight:900;letter-spacing:.5px;line-height:1.4;white-space:nowrap}
+.grp-vchip.ok{background:rgba(16,120,60,.9);border:1px solid rgba(60,220,130,.5);color:#d1ffe4}
+.grp-vchip.warn{background:rgba(150,105,10,.9);border:1px solid rgba(255,209,102,.5);color:#ffe9b0}
+.grp-vchip.auto{background:rgba(60,66,80,.9);border:1px solid rgba(255,255,255,.25);color:#dfe4ee}
+/* 🏷️ custom quality name chips (Sky / UnTuch / FreeMasx / Mydesi) */
+.brand-chip{background:rgba(60,20,120,.85)!important;color:#d8c7ff!important;border:1px solid rgba(150,110,255,.45)!important}
+.brand-text{color:#c4b5fd!important}
+.grp-qlabel.grp-brand{background:rgba(60,20,120,.82);color:#d8c7ff;border-color:rgba(150,110,255,.5)}
+.grp-variants{display:none;border-top:1px solid var(--border);background:var(--bg2)}
 .grp-card.open .grp-variants{display:grid;grid-template-columns:1fr;gap:8px;padding:10px}
 @media(min-width:600px){.grp-card.open .grp-variants{grid-template-columns:repeat(3,1fr)}}
-.grp-variants .file-card:hover{transform:none}
+.grp-variants .file-card:hover{transform:none;box-shadow:none;border-color:var(--border)}
+.grp-text-info{cursor:pointer}
+.grp-text-count{font-size:11px;font-weight:800;color:#ffd166}
+.grp-caret-text{margin-left:auto;color:var(--muted);font-size:11px}
+.grp-card.open .grp-caret-text{color:var(--accent)}
+/* 🗂 admin group button (Edit / Delete ke saath) */
+.btn-grp{flex:1;padding:6px 0;border-radius:6px;font-size:11px;font-weight:700;cursor:pointer;border:1px solid rgba(255,209,102,.35);background:rgba(120,90,10,.72);backdrop-filter:blur(10px);color:#ffd166;transition:background .12s}
+.btn-grp:hover{background:rgba(180,135,20,.9)}
 </style>
 """
 
@@ -97,6 +121,14 @@ CARD_CSS = """
 # ─────────────────────────────────────────────────────────────────────────────
 JS_ENGINE = """
 var curQ='',curOff=0,nextOff='',curCol='all',curPage=1;
+/* 🧩 grouping ka aadhar — admin dropdown se badalta hai (quality/episode/season).
+   localStorage se pehle hi load kar lete hain taaki page kholte hi pehla search
+   bhi admin ki chuni hui basis par ho (server non-admin par quality force karta hai). */
+var gbasis='quality';
+try{var _sb=localStorage.getItem('ff_dashboard_basis');
+    if(_sb==='quality'||_sb==='episode'||_sb==='season'||_sb==='source'){gbasis=_sb;}}catch(e){}
+/* group card ka poora data (key → card) — popup actions isi se chalte hain */
+var GRP_DATA={};
 var searchReqId=0;
 // Dashboard mode has its own preference key so an old shared posterMode value
 // cannot override the text-only dashboard default.
@@ -152,6 +184,33 @@ document.querySelectorAll('.cdd-menu').forEach(function(m){
 });
 function changeCol(val){curCol=val;doSearch(0,true);}
 
+/* 🧩 Grouping basis dropdown (sirf admin ke page par hota hai) */
+function toggleBasis(e){
+    if(e){e.stopPropagation();}
+    var menu=document.getElementById('cddBasisMenu'),btn=document.getElementById('cddBasisBtn');
+    if(!menu) return;
+    var isOpen=menu.style.display!=='none';
+    closeCdds();
+    if(isOpen){menu.style.display='none';btn.classList.remove('open');}
+    else{menu.style.display='block';btn.classList.add('open');}
+}
+function pickBasis(val,label,el,e){
+    if(e){e.stopPropagation();}
+    gbasis=val;
+    try{localStorage.setItem('ff_dashboard_basis',gbasis);}catch(err){}
+    var l=document.getElementById('cddBasisLabel');
+    if(l) l.innerHTML=label;
+    document.querySelectorAll('#cddBasisMenu .cdd-item').forEach(function(i){i.classList.remove('selected');});
+    if(el) el.classList.add('selected');
+    var menu=document.getElementById('cddBasisMenu'),btn=document.getElementById('cddBasisBtn');
+    if(menu) menu.style.display='none';
+    if(btn) btn.classList.remove('open');
+    if(val==='source' && !(window.RELEASE_TAGS||[]).length){
+        showToast('Pehle "Quality Groups" page par apni quality names (Sky / UnTuch…) add karo','error');
+    }
+    doSearch(0,true);
+}
+
 /* ✅ DUPLICATE REMOVED: handleThumbError() यहाँ दोबारा defined था, जबकि
    web_assets.py के global JS में यह पहले से है (और वहाँ वाला version बेहतर है —
    पूरा poster-box overlay करता है, सिर्फ़ छोटा span नहीं)। build_page() global JS
@@ -163,6 +222,12 @@ function triggerRipple(btn){btn.classList.remove('ripple-go');void btn.offsetWid
 
 var isAdminView=false;
 var openGroups={};
+/* 📄 Grouped pages ke offsets barabar nahi hote (group boundary par cut hote hain),
+   isliye Previous ke liye offset-stack rakhna padta hai. */
+var offStack=[0];
+/* Manual group ke saare members uske card me hi hote hain, isliye agle page par
+   wahi group dobara na dikhe (members door-door hone par duplicate card aata tha). */
+var shownManual={};
 
 /* 📄 Ek file ka card (pehle doSearch ke andar forEach me tha — bina badle yahan aa gaya).
    nested=true: group ke andar wala variant card (card-enter animation nahi). */
@@ -177,6 +242,7 @@ function cardHtml(f,nested){
             if(isAdminView){
                 adminBtns='<div class="poster-admin">'+
                     '<button class="btn-edit" onclick="event.stopPropagation();editFile(\\''+f.file_id+'\\',\\''+f.raw_collection+'\\',\\''+encName+'\\', \\''+encCap+'\\')">&#9999; Edit</button>'+
+                    '<button class="btn-grp" onclick="event.stopPropagation();openGroupModal(\\''+f.file_id+'\\',\\''+f.raw_collection+'\\')">&#128451; Group</button>'+
                     '<button class="btn-del" onclick="event.stopPropagation();deleteFile(\\''+f.file_id+'\\',\\''+f.raw_collection+'\\')">&#128465; Delete</button>'+
                 '</div>';
             }
@@ -189,6 +255,8 @@ function cardHtml(f,nested){
             /* 🖼️ Resolution chip (1280×720 → "720p", 1920×1080 → "1080p") — duration chip
                jaisa hi null-tolerant: data na ho to chip banta hi nahi. */
             var resChip  = f.res ? '<span class="res-chip">'+f.res+'</span>' : '';
+            /* 🏷️ admin ka custom quality name (Sky / UnTuch / FreeMasx / Mydesi…) */
+            var brandChip = f.brand ? '<span class="res-chip brand-chip">'+f.brand+'</span>' : '';
             var resText  = f.res ? '<span class="tc-res">'+f.res+'</span>' : '';
 
             var posterHtml='';
@@ -198,7 +266,7 @@ function cardHtml(f,nested){
                     '<div class="poster-top">'+
                         '<span class="type-chip">'+f.type.toUpperCase()+'</span>'+
                         '<span class="size-chip">'+f.size+'</span>'+
-                        durChip+resChip+
+                        durChip+resChip+brandChip+
                         '<span class="source-pill '+sc+'"><span class="source-dot"></span>'+sc.toUpperCase()+'</span>'+
                     '</div>'+
                     adminBtns+
@@ -210,12 +278,13 @@ function cardHtml(f,nested){
                 textInfo='<div class="fc-text-info" onclick="toggleAdminBtns(this.closest(\\'.file-card\\'),event)">'+
                     '<span class="tc-type">'+f.type.toUpperCase()+'</span>'+
                     '<span class="tc-size">'+f.size+'</span>'+
-                    durText+resText+
+                    durText+resText+(f.brand?'<span class="tc-res brand-text">'+f.brand+'</span>':'')+
                     '<span class="source-pill '+sc+'" style="margin-left:auto"><span class="source-dot"></span>'+sc.toUpperCase()+'</span>'+
                 '</div>';
                 if(isAdminView){
                     textInfo+='<div class="text-admin-row">'+
                         '<button class="btn-edit" onclick="event.stopPropagation();editFile(\\''+f.file_id+'\\',\\''+f.raw_collection+'\\',\\''+encName+'\\', \\''+encCap+'\\')">&#9999; Edit</button>'+
+                        '<button class="btn-grp" onclick="event.stopPropagation();openGroupModal(\\''+f.file_id+'\\',\\''+f.raw_collection+'\\')">&#128451; Group</button>'+
                         '<button class="btn-del" onclick="event.stopPropagation();deleteFile(\\''+f.file_id+'\\',\\''+f.raw_collection+'\\')">&#128465; Delete</button>'+
                     '</div>';
                 }
@@ -230,31 +299,81 @@ function cardHtml(f,nested){
             '</div>';
 }
 
-/* 🗂️ Ek title ki alag-alag quality ka group card. Header par title + quality chips;
-   tap par andar har quality ka poora card (naam-click, Edit, Delete sab pehle jaise). */
+/* 🗂️ Ek title ki alag-alag quality ka group card.
+   • Naam par click → group khulta hai aur uski saari files dikh jaati hain.
+   • Thumbnail par click → admin action row (Manage / Verify / Migrate / Delete),
+     bilkul waise hi jaise file card me Edit/Delete ka popup aata hai.
+   • Quality count + labels thumbnail ke ANDAR, neeche.
+   • Har group ka apna 🆔 hota hai; ✅ VERIFIED sirf admin ke check karne par. */
 function groupHtml(g){
+    GRP_DATA[g.key]=g;                       /* popup actions isi data se chalte hain */
     var open=openGroups[g.key]?' open':'';
-    var chips='';
-    (g.chips||[]).forEach(function(c){
-        chips+='<span class="grp-chip">'+c.label+(c.count>1?' <i>x'+c.count+'</i>':'')+'</span>';
-    });
-    var poster='';
-    if(pMode!=='none' && g.tg_thumb){
-        poster='<img class="grp-poster" src="'+g.tg_thumb+'" loading="lazy" decoding="async" onerror="this.style.display=\\'none\\'">';
+    var vlist=g.variants||[];
+    var labels=(g.labels||[]).map(function(l){return '<span class="grp-qlabel">'+l+'</span>';}).join('');
+    /* 🏷️ custom quality names (Sky / UnTuch / FreeMasx / Mydesi) — labels me pehle hi
+       "Sky 1080p" ki tarah aa jaate hain; alag brand chips bhi dikha dete hain. */
+    var brands=g.brands||[];
+    var brandLabels=brands.map(function(b){return '<span class="grp-qlabel grp-brand">'+b+'</span>';}).join('');
+    var labelsText=(g.labels||[]).join(' · ');
+    var basis=g.basis||'quality';
+    var epCount=parseInt(g.ep_count,10)||0;
+    var qWord = basis==='season' ? (epCount===1?'Episode':'Episodes')
+                                 : (g.count===1?'Quality':'Qualities');
+    var master=vlist[0]||{};
+    var k=g.key;
+    var idText = g.gid ? String(g.gid).slice(-6) : String(g.key||'').slice(0,6);
+    var idChip = '<span class="grp-idchip">#'+idText+'</span>';
+    var vChip = g.verified
+        ? '<span class="grp-vchip ok">&#10003; VERIFIED</span>'
+        : (g.manual ? '<span class="grp-vchip warn">&#9888; UNVERIFIED</span>'
+                    : '<span class="grp-vchip auto">AUTO</span>');
+
+    /* admin action row — thumbnail ke neeche wali patti (tap par khulti hai) */
+    var adminBtns='';
+    if(isAdminView){
+        adminBtns='<div class="poster-admin">'+
+            '<button class="btn-edit" onclick="event.stopPropagation();grpManage(\\''+k+'\\')">&#128451; Manage</button>'+
+            '<button class="btn-grp" onclick="event.stopPropagation();grpVerify(\\''+k+'\\')">'+(g.verified?'&#10003; Verified':'&#9989; Verify')+'</button>'+
+            '<button class="btn-grp" onclick="event.stopPropagation();grpMigrate(\\''+k+'\\')">&#128256; Migrate</button>'+
+            (g.gid?'<button class="btn-del" onclick="event.stopPropagation();grpDeleteGroup(\\''+k+'\\')">&#128465; Delete</button>':'')+
+        '</div>';
     }
+    var tapFn=adminBtns?"toggleAdminBtns(this.closest('.grp-card'),event)":"toggleGroup(this.closest('.grp-card'),event)";
+
+    var poster='';
+    if(pMode!=='none'){
+        var thumb=g.tg_thumb||master.tg_thumb||'';
+        poster='<div class="poster-box grp-poster-box" onclick="'+tapFn+'">'+
+            '<img src="'+thumb+'" class="fc-poster" onload="this.classList.add(\\'loaded\\')" onerror="this.style.opacity=0" loading="lazy" decoding="async">'+
+            '<div class="poster-top">'+
+                '<span class="type-chip">'+String(g.type||'VIDEO').toUpperCase()+'</span>'+
+                '<span class="size-chip">'+g.count+' FILES</span>'+
+                idChip+vChip+
+            '</div>'+
+            '<div class="grp-qbar">'+
+                '<span class="grp-qcount">&#127916; '+g.count+' '+qWord+'</span>'+
+                '<span class="grp-qlabels">'+(brandLabels||labels)+'</span>'+
+            '</div>'+
+            adminBtns+
+        '</div>';
+    } else {
+        poster='<div class="fc-text-info grp-text-info" onclick="'+tapFn+'">'+
+            '<span class="tc-type">'+String(g.type||'VIDEO').toUpperCase()+'</span>'+
+            '<span class="grp-text-count">&#127916; '+g.count+' '+qWord+'</span>'+
+            '<span class="tc-res">'+labelsText+'</span>'+
+            idChip+
+        '</div>';
+        if(adminBtns){ poster+=adminBtns.replace('poster-admin','text-admin-row'); }
+    }
+
     var inner='';
-    g.variants.forEach(function(v){inner+=cardHtml(v,true);});
-    return '<div class="grp-card card-enter'+open+'" data-gk="'+g.key+'">'+
-        '<div class="grp-head" onclick="toggleGroup(this.parentNode)">'+
-            poster+
-            '<div class="grp-main">'+
-                '<div class="grp-top">'+
-                    '<span class="grp-type">'+String(g.type||'VIDEO')+'</span>'+
-                    '<span class="grp-count">'+g.count+' QUALITIES</span>'+
-                    '<span class="grp-arrow">&#9662;</span>'+
-                '</div>'+
-                '<div class="grp-title">'+g.title+'</div>'+
-                '<div class="grp-chips">'+chips+'</div>'+
+    vlist.forEach(function(v){inner+=cardHtml(v,true);});
+    return '<div class="file-card grp-card card-enter'+open+'" data-gk="'+g.key+'">'+
+        poster+
+        '<div class="fc-body">'+
+            '<div class="fc-name grp-name" onclick="toggleGroup(this.closest(\\'.grp-card\\'),event)" title="Saari files dekhne ke liye naam par click karein">'+
+                '<span class="grp-name-text">'+g.title+'</span>'+
+                '<span class="grp-caret">&#9662;</span>'+
             '</div>'+
         '</div>'+
         '<div class="grp-variants">'+inner+'</div>'+
@@ -269,7 +388,7 @@ function toggleGroup(el){
 async function doSearch(o,allowEmpty){
     var q=document.getElementById('q').value.trim();
     if(!q && !allowEmpty){showToast('Please enter a movie name','error');return;}
-    curQ=q;curOff=o;if(o===0)curPage=1;
+    curQ=q;curOff=o;if(o===0){curPage=1;offStack=[0];}
     if(q){sessionStorage.setItem('ff_dash_q',q);}else{sessionStorage.removeItem('ff_dash_q');}
 
     var myReq=++searchReqId;
@@ -281,7 +400,7 @@ async function doSearch(o,allowEmpty){
     },150);
 
     try{
-        var r=await fetch('/api/search?q='+encodeURIComponent(q)+'&offset='+o+'&col='+curCol+'&mode='+pMode+'&group=1');
+        var r=await fetch('/api/search?q='+encodeURIComponent(q)+'&offset='+o+'&col='+curCol+'&mode='+pMode+'&group=1&gbasis='+encodeURIComponent(gbasis));
         if(myReq!==searchReqId){clearTimeout(loadTimer);if(qWrap)qWrap.classList.remove('loading');return;}
         clearTimeout(loadTimer);
         if(qWrap)qWrap.classList.remove('loading');
@@ -306,9 +425,19 @@ async function doSearch(o,allowEmpty){
         }
         var h='';
         isAdminView=!!d.is_admin;
+        if(o===0)shownManual={};
         d.results.forEach(function(f){
+            if(f.group && f.manual && f.gid){
+                if(shownManual[f.gid])return;
+                shownManual[f.gid]=1;
+            }
             h+=f.group?groupHtml(f):cardHtml(f,false);
         });
+        if(!h){ /* poora page duplicate groups ka nikla — phir bhi dikhana zaroori hai */
+            d.results.forEach(function(f){
+                h+=f.group?groupHtml(f):cardHtml(f,false);
+            });
+        }
         resDiv.className='res-grid mode-'+pMode;
         resDiv.innerHTML=h;
         staggerCards(resDiv);
@@ -324,8 +453,8 @@ async function doSearch(o,allowEmpty){
     }catch(e){clearTimeout(loadTimer);if(qWrap)qWrap.classList.remove('loading');showToast('Network error','error');}
 }
 
-function next(){if(nextOff){curPage++;doSearch(nextOff);scrollTo(0,0);}}
-function prev(){if(curPage>1){curPage--;doSearch(Math.max(0,curOff-LIMIT_VAL));scrollTo(0,0);}}
+function next(){if(nextOff){if(offStack[offStack.length-1]!==nextOff)offStack.push(nextOff);curPage=offStack.length;doSearch(nextOff);scrollTo(0,0);}}
+function prev(){if(offStack.length>1){offStack.pop();curPage=offStack.length;doSearch(offStack[offStack.length-1]);scrollTo(0,0);}}
 
 document.addEventListener('DOMContentLoaded',function(){
     var q=document.getElementById('q');
@@ -386,6 +515,7 @@ SEARCH_ZONE = (
                     '<div class="cdd-item" data-val="archive" onclick="pickCol(\'archive\',\'\U0001f7e0 Archive\',this)">\U0001f7e0 Archive<span class="cdd-radio"><span class="cdd-radio-dot"></span></span></div>'
                 '</div>'
             '</div>'
+            '<!--GBASIS-->'
             '<div class="cdd-wrap" id="cddModeWrap">'
                 '<div class="cdd-btn" id="cddModeBtn" onclick="toggleCdd(\'mode\')">'
                     '<span id="cddModeLabel">' + _DEF_MODE_LBL + '</span>'
@@ -429,7 +559,22 @@ async def dash(req):
     if not await require_active_plan(role, tg_id):
         return web.HTTPFound('/premium_expired')
 
-    return build_page("Home - Fast Finder", DASHBOARD_BODY, "", "dash", role)
+    body = DASHBOARD_BODY
+    if role == "admin":
+        # 🏷️ admin ke custom quality names page me daal do — "Source" basis chunte
+        # waqt JS ko pata rahe ki tags set hain ya nahi.
+        try:
+            from web.search_api import get_release_tags
+            tags = await get_release_tags()
+        except Exception:
+            tags = []
+        tags_js = f"<script>window.RELEASE_TAGS={json.dumps(tags)};</script>"
+        # Group modal + shortcut sirf admin ke page par (users ko extra JS/CSS nahi)
+        body = (DASHBOARD_BODY.replace("<!--GBASIS-->", GROUP_BASIS_HTML)
+                + tags_js + GROUP_UI_CSS + GROUP_MODAL_HTML + GROUP_MIGRATE_HTML + GROUP_UI_JS
+                + '<a href="/groups" class="dash-groups-fab" title="Saare quality groups manage karo">'
+                  '<span style="font-size:15px">&#128451;</span> Quality Groups</a>')
+    return build_page("Home - Fast Finder", body, "", "dash", role)
 
 
 @dashboard_routes.get('/logout')

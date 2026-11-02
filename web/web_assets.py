@@ -361,11 +361,15 @@ async def require_active_plan(role, tg_id):
 # href बदलना हो तो दोनों लाइनें edit करनी पड़ती थीं। अब एक ही menu list से बनता है।
 NAV_MENU = (
     ("dash",   "/dashboard", "Home"),
+    ("groups", "/groups",    "🗂 Quality Groups"),
     ("posts",  "/posts",     "📝 Posts"),
     ("actors", "/actors",    "🎭 Actors"),
     ("stats",  "/stats",     "Database Stats"),
     ("profile", "/profile",  "Profile Settings"),
 )
+
+# Admin-only menu tabs (baaki sab logged-in users ko dikhte hain)
+ADMIN_ONLY_TABS = {"stats", "groups"}
 
 # ⚡ FAST: head का static हिस्सा (fonts + ~25KB CSS + JS) module-load पर एक ही बार
 # बन जाता है। पहले build_page() हर request पर पूरा CSS/JS दोबारा f-string में
@@ -436,7 +440,7 @@ def build_page(title, body, cls="", active_tab="", role=None):
         links = "".join(
             f'<a href="{href}" class="sb-link {"active" if active_tab == tab else ""}">{label}</a>'
             for tab, href, label in NAV_MENU
-            if role == "admin" or tab != "stats"   # Database Stats admin-only है
+            if role == "admin" or tab not in ADMIN_ONLY_TABS   # stats + groups admin-only hain
         )
         nav = _NAV_SHELL.format(links=links)
     else:
